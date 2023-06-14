@@ -1,7 +1,4 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+from importlib import reload
 import numpy as np
 from numpy.testing import assert_equal, assert_almost_equal
 import pytest
@@ -10,10 +7,7 @@ import sys
 import ray
 import ray.experimental.array.remote as ra
 import ray.experimental.array.distributed as da
-import ray.tests.cluster_utils
-
-if sys.version_info >= (3, 0):
-    from importlib import reload
+import ray.cluster_utils
 
 
 @pytest.fixture
@@ -24,13 +18,13 @@ def reload_modules():
 
 def test_remote_array_methods(ray_start_2_cpus, reload_modules):
     # test eye
-    object_id = ra.eye.remote(3)
-    val = ray.get(object_id)
+    object_ref = ra.eye.remote(3)
+    val = ray.get(object_ref)
     assert_almost_equal(val, np.eye(3))
 
     # test zeros
-    object_id = ra.zeros.remote([3, 4, 5])
-    val = ray.get(object_id)
+    object_ref = ra.zeros.remote([3, 4, 5])
+    val = ray.get(object_ref)
     assert_equal(val, np.zeros([3, 4, 5]))
 
     # test qr - pass by value
@@ -40,7 +34,7 @@ def test_remote_array_methods(ray_start_2_cpus, reload_modules):
     r_val = ray.get(r_id)
     assert_almost_equal(np.dot(q_val, r_val), a_val)
 
-    # test qr - pass by objectid
+    # test qr - pass by object_ref
     a = ra.random.normal.remote([10, 13])
     q_id, r_id = ra.linalg.qr.remote(a)
     a_val = ray.get(a)
@@ -55,12 +49,31 @@ def test_distributed_array_assemble(ray_start_2_cpus, reload_modules):
     x = da.DistArray([2 * da.BLOCK_SIZE, da.BLOCK_SIZE], np.array([[a], [b]]))
     assert_equal(
         x.assemble(),
-        np.vstack([
-            np.ones([da.BLOCK_SIZE, da.BLOCK_SIZE]),
-            np.zeros([da.BLOCK_SIZE, da.BLOCK_SIZE])
-        ]))
+        np.vstack(
+            [
+                np.ones([da.BLOCK_SIZE, da.BLOCK_SIZE]),
+                np.zeros([da.BLOCK_SIZE, da.BLOCK_SIZE]),
+            ]
+        ),
+    )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Failing on Windows.")
+@pytest.mark.parametrize(
+    "ray_start_cluster_2_nodes",
+    [
+        {
+            "_system_config": {
+                # NOTE(swang): If plasma store notifications to the raylet for new
+                # objects are delayed by long enough, then this causes concurrent
+                # fetch calls to timeout and mistakenly mark the object as lost.
+                # Set the timeout very high to prevent this.
+                "object_timeout_milliseconds": 60000,
+            }
+        }
+    ],
+    indirect=True,
+)
 def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
     x = da.zeros.remote([9, 25, 51], "float")
     assert_equal(ray.get(da.assemble.remote(x)), np.zeros([9, 25, 51]))
@@ -70,8 +83,7 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
 
     x = da.random.normal.remote([11, 25, 49])
     y = da.copy.remote(x)
-    assert_equal(
-        ray.get(da.assemble.remote(x)), ray.get(da.assemble.remote(y)))
+    assert_equal(ray.get(da.assemble.remote(x)), ray.get(da.assemble.remote(y)))
 
     x = da.eye.remote(25, dtype_name="float")
     assert_equal(ray.get(da.assemble.remote(x)), np.eye(25))
@@ -79,14 +91,14 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
     x = da.random.normal.remote([25, 49])
     y = da.triu.remote(x)
     assert_equal(
-        ray.get(da.assemble.remote(y)), np.triu(
-            ray.get(da.assemble.remote(x))))
+        ray.get(da.assemble.remote(y)), np.triu(ray.get(da.assemble.remote(x)))
+    )
 
     x = da.random.normal.remote([25, 49])
     y = da.tril.remote(x)
     assert_equal(
-        ray.get(da.assemble.remote(y)), np.tril(
-            ray.get(da.assemble.remote(x))))
+        ray.get(da.assemble.remote(y)), np.tril(ray.get(da.assemble.remote(x)))
+    )
 
     x = da.random.normal.remote([25, 49])
     y = da.random.normal.remote([49, 18])
@@ -103,7 +115,8 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
     z = da.add.remote(x, y)
     assert_almost_equal(
         ray.get(da.assemble.remote(z)),
-        ray.get(da.assemble.remote(x)) + ray.get(da.assemble.remote(y)))
+        ray.get(da.assemble.remote(x)) + ray.get(da.assemble.remote(y)),
+    )
 
     # test subtract
     x = da.random.normal.remote([33, 40])
@@ -111,27 +124,30 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
     z = da.subtract.remote(x, y)
     assert_almost_equal(
         ray.get(da.assemble.remote(z)),
-        ray.get(da.assemble.remote(x)) - ray.get(da.assemble.remote(y)))
+        ray.get(da.assemble.remote(x)) - ray.get(da.assemble.remote(y)),
+    )
 
     # test transpose
     x = da.random.normal.remote([234, 432])
     y = da.transpose.remote(x)
-    assert_equal(
-        ray.get(da.assemble.remote(x)).T, ray.get(da.assemble.remote(y)))
+    assert_equal(ray.get(da.assemble.remote(x)).T, ray.get(da.assemble.remote(y)))
 
     # test numpy_to_dist
     x = da.random.normal.remote([23, 45])
     y = da.assemble.remote(x)
     z = da.numpy_to_dist.remote(y)
     w = da.assemble.remote(z)
-    assert_equal(
-        ray.get(da.assemble.remote(x)), ray.get(da.assemble.remote(z)))
+    assert_equal(ray.get(da.assemble.remote(x)), ray.get(da.assemble.remote(z)))
     assert_equal(ray.get(y), ray.get(w))
 
     # test da.tsqr
-    for shape in [[123, da.BLOCK_SIZE], [7, da.BLOCK_SIZE],
-                  [da.BLOCK_SIZE, da.BLOCK_SIZE], [da.BLOCK_SIZE, 7],
-                  [10 * da.BLOCK_SIZE, da.BLOCK_SIZE]]:
+    for shape in [
+        [123, da.BLOCK_SIZE],
+        [7, da.BLOCK_SIZE],
+        [da.BLOCK_SIZE, da.BLOCK_SIZE],
+        [da.BLOCK_SIZE, 7],
+        [10 * da.BLOCK_SIZE, da.BLOCK_SIZE],
+    ]:
         x = da.random.normal.remote(shape)
         K = min(shape)
         q, r = da.linalg.tsqr.remote(x)
@@ -145,8 +161,7 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
 
     # test da.linalg.modified_lu
     def test_modified_lu(d1, d2):
-        print("testing dist_modified_lu with d1 = " + str(d1) + ", d2 = " +
-              str(d2))
+        print("testing dist_modified_lu with d1 = " + str(d1) + ", d2 = " + str(d2))
         assert d1 >= d2
         m = ra.random.normal.remote([d1, d2])
         q, r = ra.linalg.qr.remote(m)
@@ -171,8 +186,7 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
 
     # test dist_tsqr_hr
     def test_dist_tsqr_hr(d1, d2):
-        print("testing dist_tsqr_hr with d1 = " + str(d1) + ", d2 = " +
-              str(d2))
+        print("testing dist_tsqr_hr with d1 = " + str(d1) + ", d2 = " + str(d2))
         a = da.random.normal.remote([d1, d2])
         y, t, y_top, r = da.linalg.tsqr_hr.remote(a)
         a_val = ray.get(da.assemble.remote(a))
@@ -188,9 +202,13 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
         # Check that a = (I - y * t * y_top.T) * r.
         assert_almost_equal(np.dot(q, r_val), a_val)
 
-    for d1, d2 in [(123, da.BLOCK_SIZE), (7, da.BLOCK_SIZE), (da.BLOCK_SIZE,
-                                                              da.BLOCK_SIZE),
-                   (da.BLOCK_SIZE, 7), (10 * da.BLOCK_SIZE, da.BLOCK_SIZE)]:
+    for d1, d2 in [
+        (123, da.BLOCK_SIZE),
+        (7, da.BLOCK_SIZE),
+        (da.BLOCK_SIZE, da.BLOCK_SIZE),
+        (da.BLOCK_SIZE, 7),
+        (10 * da.BLOCK_SIZE, da.BLOCK_SIZE),
+    ]:
         test_dist_tsqr_hr(d1, d2)
 
     def test_dist_qr(d1, d2):
@@ -207,12 +225,28 @@ def test_distributed_array_methods(ray_start_cluster_2_nodes, reload_modules):
         assert_equal(r_val, np.triu(r_val))
         assert_almost_equal(a_val, np.dot(q_val, r_val))
 
-    for d1, d2 in [(123, da.BLOCK_SIZE), (7, da.BLOCK_SIZE), (da.BLOCK_SIZE,
-                                                              da.BLOCK_SIZE),
-                   (da.BLOCK_SIZE, 7), (13, 21), (34, 35), (8, 7)]:
+    for d1, d2 in [
+        (123, da.BLOCK_SIZE),
+        (7, da.BLOCK_SIZE),
+        (da.BLOCK_SIZE, da.BLOCK_SIZE),
+        (da.BLOCK_SIZE, 7),
+        (13, 21),
+        (34, 35),
+        (8, 7),
+    ]:
         test_dist_qr(d1, d2)
         test_dist_qr(d2, d1)
     for _ in range(20):
         d1 = np.random.randint(1, 35)
         d2 = np.random.randint(1, 35)
         test_dist_qr(d1, d2)
+
+
+if __name__ == "__main__":
+    import os
+    import pytest
+
+    if os.environ.get("PARALLEL_CI"):
+        sys.exit(pytest.main(["-n", "auto", "--boxed", "-vs", __file__]))
+    else:
+        sys.exit(pytest.main(["-sv", __file__]))

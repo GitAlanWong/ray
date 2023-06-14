@@ -1,25 +1,32 @@
-"""This test checks that BayesOpt is functional.
+"""This example demonstrates the usage of BayesOpt with Ray Tune.
 
 It also checks that it is usable with a separate scheduler.
+
+Requires the BayesOpt library to be installed (`pip install bayesian-optimization`).
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import time
 
-import ray
-from ray.tune import run
+from ray import air, tune
+from ray.air import session
 from ray.tune.schedulers import AsyncHyperBandScheduler
-from ray.tune.suggest.bayesopt import BayesOptSearch
+from ray.tune.search import ConcurrencyLimiter
+from ray.tune.search.bayesopt import BayesOptSearch
 
 
-def easy_objective(config, reporter):
-    import time
-    time.sleep(0.2)
-    for i in range(config["iterations"]):
-        reporter(
-            timesteps_total=i,
-            mean_loss=(config["height"] - 14)**2 - abs(config["width"] - 3))
-        time.sleep(0.02)
+def evaluation_fn(step, width, height):
+    return (0.1 + width * step / 100) ** (-1) + height * 0.1
+
+
+def easy_objective(config):
+    # Hyperparameters
+    width, height = config["width"], config["height"]
+
+    for step in range(config["steps"]):
+        # Iterative training function - can be any arbitrary training procedure
+        intermediate_score = evaluation_fn(step, width, height)
+        # Feed the score back back to Tune.
+        session.report({"iterations": step, "mean_loss": intermediate_score})
+        time.sleep(0.1)
 
 
 if __name__ == "__main__":
@@ -27,34 +34,31 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--smoke-test", action="store_true", help="Finish quickly for testing")
+        "--smoke-test", action="store_true", help="Finish quickly for testing"
+    )
     args, _ = parser.parse_known_args()
-    ray.init()
 
-    space = {"width": (0, 20), "height": (-100, 100)}
-
-    config = {
-        "num_samples": 10 if args.smoke_test else 1000,
-        "config": {
-            "iterations": 100,
+    algo = BayesOptSearch(utility_kwargs={"kind": "ucb", "kappa": 2.5, "xi": 0.0})
+    algo = ConcurrencyLimiter(algo, max_concurrent=4)
+    scheduler = AsyncHyperBandScheduler()
+    tuner = tune.Tuner(
+        easy_objective,
+        tune_config=tune.TuneConfig(
+            metric="mean_loss",
+            mode="min",
+            search_alg=algo,
+            scheduler=scheduler,
+            num_samples=10 if args.smoke_test else 1000,
+        ),
+        run_config=air.RunConfig(
+            name="my_exp",
+        ),
+        param_space={
+            "steps": 100,
+            "width": tune.uniform(0, 20),
+            "height": tune.uniform(-100, 100),
         },
-        "stop": {
-            "timesteps_total": 100
-        }
-    }
-    algo = BayesOptSearch(
-        space,
-        max_concurrent=4,
-        metric="mean_loss",
-        mode="min",
-        utility_kwargs={
-            "kind": "ucb",
-            "kappa": 2.5,
-            "xi": 0.0
-        })
-    scheduler = AsyncHyperBandScheduler(metric="mean_loss", mode="min")
-    run(easy_objective,
-        name="my_exp",
-        search_alg=algo,
-        scheduler=scheduler,
-        **config)
+    )
+    results = tuner.fit()
+
+    print("Best hyperparameters found were: ", results.get_best_result().config)

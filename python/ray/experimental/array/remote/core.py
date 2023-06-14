@@ -1,8 +1,5 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
+
 import ray
 
 
@@ -47,7 +44,8 @@ def hstack(*xs):
 # TODO(rkn): Be consistent about using "index" versus "indices".
 @ray.remote
 def subarray(a, lower_indices, upper_indices):
-    return a[[slice(l, u) for (l, u) in zip(lower_indices, upper_indices)]]
+    idx = tuple(slice(l, u) for (l, u) in zip(lower_indices, upper_indices))
+    return a[idx]
 
 
 @ray.remote
@@ -71,8 +69,8 @@ def diag(v, k=0):
 
 
 @ray.remote
-def transpose(a, axes=[]):
-    axes = None if axes == [] else axes
+def transpose(a, axes=None):
+    axes = None if (axes == [] or axes is None) else axes
     return np.transpose(a, axes=axes)
 
 

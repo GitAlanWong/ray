@@ -1,6 +1,11 @@
+from libcpp.string cimport string as c_string
 from ray.includes.ray_config cimport RayConfig
 
 cdef class Config:
+    @staticmethod
+    def initialize(c_string config_list):
+        return RayConfig.instance().initialize(config_list)
+
     @staticmethod
     def ray_cookie():
         return RayConfig.instance().ray_cookie()
@@ -10,33 +15,17 @@ cdef class Config:
         return RayConfig.instance().handler_warning_timeout_ms()
 
     @staticmethod
-    def heartbeat_timeout_milliseconds():
-        return RayConfig.instance().heartbeat_timeout_milliseconds()
-
-    @staticmethod
     def debug_dump_period_milliseconds():
         return RayConfig.instance().debug_dump_period_milliseconds()
 
     @staticmethod
-    def num_heartbeats_timeout():
-        return RayConfig.instance().num_heartbeats_timeout()
-
-    @staticmethod
-    def num_heartbeats_warning():
-        return RayConfig.instance().num_heartbeats_warning()
-
-    @staticmethod
-    def initial_reconstruction_timeout_milliseconds():
+    def object_timeout_milliseconds():
         return (RayConfig.instance()
-                .initial_reconstruction_timeout_milliseconds())
+                .object_timeout_milliseconds())
 
     @staticmethod
     def get_timeout_milliseconds():
         return RayConfig.instance().get_timeout_milliseconds()
-
-    @staticmethod
-    def max_lineage_size():
-        return RayConfig.instance().max_lineage_size()
 
     @staticmethod
     def worker_get_request_size():
@@ -47,16 +36,13 @@ cdef class Config:
         return RayConfig.instance().worker_fetch_request_size()
 
     @staticmethod
-    def actor_max_dummy_objects():
-        return RayConfig.instance().actor_max_dummy_objects()
+    def raylet_client_num_connect_attempts():
+        return RayConfig.instance().raylet_client_num_connect_attempts()
 
     @staticmethod
-    def num_connect_attempts():
-        return RayConfig.instance().num_connect_attempts()
-
-    @staticmethod
-    def connect_timeout_milliseconds():
-        return RayConfig.instance().connect_timeout_milliseconds()
+    def raylet_client_connect_timeout_milliseconds():
+        return (RayConfig.instance()
+                .raylet_client_connect_timeout_milliseconds())
 
     @staticmethod
     def raylet_fetch_timeout_milliseconds():
@@ -64,37 +50,12 @@ cdef class Config:
                 .raylet_fetch_timeout_milliseconds())
 
     @staticmethod
-    def raylet_reconstruction_timeout_milliseconds():
-        return (RayConfig.instance()
-                .raylet_reconstruction_timeout_milliseconds())
-
-    @staticmethod
-    def max_num_to_reconstruct():
-        return RayConfig.instance().max_num_to_reconstruct()
-
-    @staticmethod
-    def raylet_fetch_request_size():
-        return RayConfig.instance().raylet_fetch_request_size()
-
-    @staticmethod
     def kill_worker_timeout_milliseconds():
         return RayConfig.instance().kill_worker_timeout_milliseconds()
 
     @staticmethod
-    def max_time_for_handler_milliseconds():
-        return RayConfig.instance().max_time_for_handler_milliseconds()
-
-    @staticmethod
-    def size_limit():
-        return RayConfig.instance().size_limit()
-
-    @staticmethod
-    def num_elements_limit():
-        return RayConfig.instance().num_elements_limit()
-
-    @staticmethod
-    def max_time_for_loop():
-        return RayConfig.instance().max_time_for_loop()
+    def worker_register_timeout_seconds():
+        return RayConfig.instance().worker_register_timeout_seconds()
 
     @staticmethod
     def redis_db_connect_retries():
@@ -105,27 +66,6 @@ cdef class Config:
         return RayConfig.instance().redis_db_connect_wait_milliseconds()
 
     @staticmethod
-    def plasma_default_release_delay():
-        return RayConfig.instance().plasma_default_release_delay()
-
-    @staticmethod
-    def L3_cache_size_bytes():
-        return RayConfig.instance().L3_cache_size_bytes()
-
-    @staticmethod
-    def max_tasks_to_spillback():
-        return RayConfig.instance().max_tasks_to_spillback()
-
-    @staticmethod
-    def actor_creation_num_spillbacks_warning():
-        return RayConfig.instance().actor_creation_num_spillbacks_warning()
-
-    @staticmethod
-    def node_manager_forward_task_retry_timeout_milliseconds():
-        return (RayConfig.instance()
-                .node_manager_forward_task_retry_timeout_milliseconds())
-
-    @staticmethod
     def object_manager_pull_timeout_ms():
         return RayConfig.instance().object_manager_pull_timeout_ms()
 
@@ -134,25 +74,93 @@ cdef class Config:
         return RayConfig.instance().object_manager_push_timeout_ms()
 
     @staticmethod
-    def object_manager_repeated_push_delay_ms():
-        return RayConfig.instance().object_manager_repeated_push_delay_ms()
-
-    @staticmethod
     def object_manager_default_chunk_size():
         return RayConfig.instance().object_manager_default_chunk_size()
 
     @staticmethod
-    def num_workers_per_process():
-        return RayConfig.instance().num_workers_per_process()
-
-    @staticmethod
-    def max_task_lease_timeout_ms():
-        return RayConfig.instance().max_task_lease_timeout_ms()
-
-    @staticmethod
-    def num_actor_checkpoints_to_keep():
-        return RayConfig.instance().num_actor_checkpoints_to_keep()
-
-    @staticmethod
     def maximum_gcs_deletion_batch_size():
         return RayConfig.instance().maximum_gcs_deletion_batch_size()
+
+    @staticmethod
+    def metrics_report_interval_ms():
+        return RayConfig.instance().metrics_report_interval_ms()
+
+    @staticmethod
+    def enable_timeline():
+        return RayConfig.instance().enable_timeline()
+
+    @staticmethod
+    def max_grpc_message_size():
+        return RayConfig.instance().max_grpc_message_size()
+
+    @staticmethod
+    def record_ref_creation_sites():
+        return RayConfig.instance().record_ref_creation_sites()
+
+    @staticmethod
+    def start_python_importer_thread():
+        return RayConfig.instance().start_python_importer_thread()
+
+    @staticmethod
+    def use_ray_syncer():
+        return RayConfig.instance().use_ray_syncer()
+
+    @staticmethod
+    def REDIS_CA_CERT():
+        return RayConfig.instance().REDIS_CA_CERT()
+
+    @staticmethod
+    def REDIS_CA_PATH():
+        return RayConfig.instance().REDIS_CA_PATH()
+
+    @staticmethod
+    def REDIS_CLIENT_CERT():
+        return RayConfig.instance().REDIS_CLIENT_CERT()
+
+    @staticmethod
+    def REDIS_CLIENT_KEY():
+        return RayConfig.instance().REDIS_CLIENT_KEY()
+
+    @staticmethod
+    def REDIS_SERVER_NAME():
+        return RayConfig.instance().REDIS_SERVER_NAME()
+
+    @staticmethod
+    def health_check_initial_delay_ms():
+        return RayConfig.instance().health_check_initial_delay_ms()
+
+    @staticmethod
+    def health_check_period_ms():
+        return RayConfig.instance().health_check_period_ms()
+
+    @staticmethod
+    def health_check_timeout_ms():
+        return RayConfig.instance().health_check_timeout_ms()
+
+    @staticmethod
+    def health_check_failure_threshold():
+        return RayConfig.instance().health_check_failure_threshold()
+
+    @staticmethod
+    def memory_monitor_refresh_ms():
+        return (RayConfig.instance().memory_monitor_refresh_ms())
+
+    @staticmethod
+    def grpc_keepalive_time_ms():
+        return RayConfig.instance().grpc_keepalive_time_ms()
+
+    @staticmethod
+    def grpc_keepalive_timeout_ms():
+        return RayConfig.instance().grpc_keepalive_timeout_ms()
+
+    @staticmethod
+    def grpc_client_keepalive_time_ms():
+        return RayConfig.instance().grpc_client_keepalive_time_ms()
+
+    @staticmethod
+    def grpc_client_keepalive_timeout_ms():
+        return RayConfig.instance().grpc_client_keepalive_timeout_ms()
+
+    @staticmethod
+    def enable_autoscaler_v2():
+        return RayConfig.instance().enable_autoscaler_v2()

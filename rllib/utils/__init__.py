@@ -1,104 +1,145 @@
-import logging
-import os
+import contextlib
+from functools import partial
 
-from ray.rllib.utils.filter_manager import FilterManager
+from ray.rllib.utils.annotations import override, PublicAPI, DeveloperAPI
+from ray.rllib.utils.deprecation import deprecation_warning
 from ray.rllib.utils.filter import Filter
-from ray.rllib.utils.policy_client import PolicyClient
-from ray.rllib.utils.policy_server import PolicyServer
-from ray.tune.util import merge_dicts, deep_update
+from ray.rllib.utils.filter_manager import FilterManager
+from ray.rllib.utils.framework import (
+    try_import_jax,
+    try_import_tf,
+    try_import_tfp,
+    try_import_torch,
+)
+from ray.rllib.utils.numpy import (
+    sigmoid,
+    softmax,
+    relu,
+    one_hot,
+    fc,
+    lstm,
+    SMALL_NUMBER,
+    LARGE_INTEGER,
+    MIN_LOG_NN_OUTPUT,
+    MAX_LOG_NN_OUTPUT,
+)
+from ray.rllib.utils.pre_checks.env import check_env
+from ray.rllib.utils.schedules import (
+    LinearSchedule,
+    PiecewiseSchedule,
+    PolynomialSchedule,
+    ExponentialSchedule,
+    ConstantSchedule,
+)
+from ray.rllib.utils.test_utils import (
+    check,
+    check_compute_single_action,
+    check_train_results,
+    framework_iterator,
+)
+from ray.tune.utils import merge_dicts, deep_update
 
-logger = logging.getLogger(__name__)
 
-
-def renamed_class(cls, old_name):
-    """Helper class for renaming classes with a warning."""
-
-    class DeprecationWrapper(cls):
-        # note: **kw not supported for ray.remote classes
-        def __init__(self, *args, **kw):
-            new_name = cls.__module__ + "." + cls.__name__
-            logger.warn("DeprecationWarning: {} has been renamed to {}. ".
-                        format(old_name, new_name) +
-                        "This will raise an error in the future.")
-            cls.__init__(self, *args, **kw)
-
-    DeprecationWrapper.__name__ = cls.__name__
-
-    return DeprecationWrapper
-
-
-def add_mixins(base, mixins):
+@DeveloperAPI
+def add_mixins(base, mixins, reversed=False):
     """Returns a new class with mixins applied in priority order."""
 
     mixins = list(mixins or [])
 
     while mixins:
+        if reversed:
 
-        class new_base(mixins.pop(), base):
-            pass
+            class new_base(base, mixins.pop()):
+                pass
+
+        else:
+
+            class new_base(mixins.pop(), base):
+                pass
 
         base = new_base
 
     return base
 
 
-def renamed_agent(cls):
-    """Helper class for renaming Agent => Trainer with a warning."""
+@DeveloperAPI
+def force_list(elements=None, to_tuple=False):
+    """
+    Makes sure `elements` is returned as a list, whether `elements` is a single
+    item, already a list, or a tuple.
 
-    class DeprecationWrapper(cls):
-        def __init__(self, config=None, env=None, logger_creator=None):
-            old_name = cls.__name__.replace("Trainer", "Agent")
-            new_name = cls.__module__ + "." + cls.__name__
-            logger.warn("DeprecationWarning: {} has been renamed to {}. ".
-                        format(old_name, new_name) +
-                        "This will raise an error in the future.")
-            cls.__init__(self, config, env, logger_creator)
+    Args:
+        elements (Optional[any]): The inputs as single item, list, or tuple to
+            be converted into a list/tuple. If None, returns empty list/tuple.
+        to_tuple: Whether to use tuple (instead of list).
 
-    DeprecationWrapper.__name__ = cls.__name__
-
-    return DeprecationWrapper
-
-
-def try_import_tf():
-    if "RLLIB_TEST_NO_TF_IMPORT" in os.environ:
-        logger.warning("Not importing TensorFlow for test purposes")
-        return None
-
-    try:
-        if "TF_CPP_MIN_LOG_LEVEL" not in os.environ:
-            os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-        import tensorflow.compat.v1 as tf
-        tf.logging.set_verbosity(tf.logging.ERROR)
-        tf.disable_v2_behavior()
-        return tf
-    except ImportError:
-        try:
-            import tensorflow as tf
-            return tf
-        except ImportError:
-            return None
+    Returns:
+        Union[list,tuple]: All given elements in a list/tuple depending on
+            `to_tuple`'s value. If elements is None,
+            returns an empty list/tuple.
+    """
+    ctor = list
+    if to_tuple is True:
+        ctor = tuple
+    return (
+        ctor()
+        if elements is None
+        else ctor(elements)
+        if type(elements) in [list, set, tuple]
+        else ctor([elements])
+    )
 
 
-def try_import_tfp():
-    if "RLLIB_TEST_NO_TF_IMPORT" in os.environ:
-        logger.warning(
-            "Not importing TensorFlow Probability for test purposes.")
-        return None
+@DeveloperAPI
+class NullContextManager(contextlib.AbstractContextManager):
+    """No-op context manager"""
 
-    try:
-        import tensorflow_probability as tfp
-        return tfp
-    except ImportError:
-        return None
+    def __init__(self):
+        pass
 
+    def __enter__(self):
+        pass
+
+    def __exit__(self, *args):
+        pass
+
+
+force_tuple = partial(force_list, to_tuple=True)
 
 __all__ = [
+    "add_mixins",
+    "check",
+    "check_env",
+    "check_compute_single_action",
+    "check_train_results",
+    "deep_update",
+    "deprecation_warning",
+    "fc",
+    "force_list",
+    "force_tuple",
+    "framework_iterator",
+    "lstm",
+    "merge_dicts",
+    "one_hot",
+    "override",
+    "relu",
+    "sigmoid",
+    "softmax",
+    "try_import_jax",
+    "try_import_tf",
+    "try_import_tfp",
+    "try_import_torch",
+    "ConstantSchedule",
+    "DeveloperAPI",
+    "ExponentialSchedule",
     "Filter",
     "FilterManager",
-    "PolicyClient",
-    "PolicyServer",
-    "merge_dicts",
-    "deep_update",
-    "renamed_class",
-    "try_import_tf",
+    "LARGE_INTEGER",
+    "LinearSchedule",
+    "MAX_LOG_NN_OUTPUT",
+    "MIN_LOG_NN_OUTPUT",
+    "PiecewiseSchedule",
+    "PolynomialSchedule",
+    "PublicAPI",
+    "SMALL_NUMBER",
 ]

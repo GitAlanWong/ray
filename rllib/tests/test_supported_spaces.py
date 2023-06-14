@@ -1,243 +1,241 @@
+import logging
 import unittest
-import traceback
-
-import gym
-from gym.spaces import Box, Discrete, Tuple, Dict, MultiDiscrete
-from gym.envs.registration import EnvSpec
-import numpy as np
-import sys
 
 import ray
-from ray.rllib.agents.registry import get_agent_class
-from ray.rllib.tests.test_multi_agent_env import (MultiCartpole,
-                                                  MultiMountainCar)
-from ray.rllib.utils.error import UnsupportedSpaceException
-from ray.tune.registry import register_env
-
-ACTION_SPACES_TO_TEST = {
-    "discrete": Discrete(5),
-    "vector": Box(-1.0, 1.0, (5, ), dtype=np.float32),
-    "vector2": Box(-1.0, 1.0, (
-        5,
-        5,
-    ), dtype=np.float32),
-    "multidiscrete": MultiDiscrete([1, 2, 3, 4]),
-    "tuple": Tuple(
-        [Discrete(2),
-         Discrete(3),
-         Box(-1.0, 1.0, (5, ), dtype=np.float32)]),
-}
-
-OBSERVATION_SPACES_TO_TEST = {
-    "discrete": Discrete(5),
-    "vector": Box(-1.0, 1.0, (5, ), dtype=np.float32),
-    "image": Box(-1.0, 1.0, (84, 84, 1), dtype=np.float32),
-    "atari": Box(-1.0, 1.0, (210, 160, 3), dtype=np.float32),
-    "tuple": Tuple([Discrete(10),
-                    Box(-1.0, 1.0, (5, ), dtype=np.float32)]),
-    "dict": Dict({
-        "task": Discrete(10),
-        "position": Box(-1.0, 1.0, (5, ), dtype=np.float32),
-    }),
-}
+from ray.rllib.algorithms.a3c import A3CConfig
+from ray.rllib.algorithms.appo import APPOConfig
+from ray.rllib.algorithms.ars import ARSConfig
+from ray.rllib.algorithms.ddpg import DDPGConfig
+from ray.rllib.algorithms.dqn import DQNConfig
+from ray.rllib.algorithms.es import ESConfig
+from ray.rllib.algorithms.impala import ImpalaConfig
+from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.algorithms.sac import SACConfig
+from ray.rllib.utils.test_utils import check_supported_spaces
 
 
-def make_stub_env(action_space, obs_space, check_action_bounds):
-    class StubEnv(gym.Env):
-        def __init__(self):
-            self.action_space = action_space
-            self.observation_space = obs_space
-            self.spec = EnvSpec("StubEnv-v0")
-
-        def reset(self):
-            sample = self.observation_space.sample()
-            return sample
-
-        def step(self, action):
-            if check_action_bounds and not self.action_space.contains(action):
-                raise ValueError("Illegal action for {}: {}".format(
-                    self.action_space, action))
-            if (isinstance(self.action_space, Tuple)
-                    and len(action) != len(self.action_space.spaces)):
-                raise ValueError("Illegal action for {}: {}".format(
-                    self.action_space, action))
-            return self.observation_space.sample(), 1, True, {}
-
-    return StubEnv
+logger = logging.getLogger(__name__)
 
 
-def check_support(alg, config, stats, check_bounds=False, name=None):
-    covered_a = set()
-    covered_o = set()
-    for a_name, action_space in ACTION_SPACES_TO_TEST.items():
-        for o_name, obs_space in OBSERVATION_SPACES_TO_TEST.items():
-            print("=== Testing", alg, action_space, obs_space, "===")
-            stub_env = make_stub_env(action_space, obs_space, check_bounds)
-            register_env("stub_env", lambda c: stub_env())
-            stat = "ok"
-            a = None
-            try:
-                if a_name in covered_a and o_name in covered_o:
-                    stat = "skip"  # speed up tests by avoiding full grid
-                else:
-                    a = get_agent_class(alg)(config=config, env="stub_env")
-                    a.train()
-                    covered_a.add(a_name)
-                    covered_o.add(o_name)
-            except UnsupportedSpaceException:
-                stat = "unsupported"
-            except Exception as e:
-                stat = "ERROR"
-                print(e)
-                print(traceback.format_exc())
-            finally:
-                if a:
-                    try:
-                        a.stop()
-                    except Exception as e:
-                        print("Ignoring error stopping agent", e)
-                        pass
-            print(stat)
-            print()
-            stats[name or alg, a_name, o_name] = stat
+class TestSupportedSpacesIMPALA(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init()
 
-
-def check_support_multiagent(alg, config):
-    register_env("multi_mountaincar", lambda _: MultiMountainCar(2))
-    register_env("multi_cartpole", lambda _: MultiCartpole(2))
-    if "DDPG" in alg:
-        a = get_agent_class(alg)(config=config, env="multi_mountaincar")
-    else:
-        a = get_agent_class(alg)(config=config, env="multi_cartpole")
-    try:
-        a.train()
-    finally:
-        a.stop()
-
-
-class ModelSupportedSpaces(unittest.TestCase):
-    def setUp(self):
-        ray.init(num_cpus=4)
-
-    def tearDown(self):
+    @classmethod
+    def tearDownClass(cls) -> None:
         ray.shutdown()
 
-    def testAll(self):
-        stats = {}
-        check_support("IMPALA", {"num_gpus": 0}, stats)
-        check_support("APPO", {"num_gpus": 0, "vtrace": False}, stats)
-        check_support(
-            "APPO", {
-                "num_gpus": 0,
-                "vtrace": True
-            }, stats, name="APPO-vt")
-        check_support(
-            "DDPG", {
-                "exploration_ou_noise_scale": 100.0,
-                "timesteps_per_iteration": 1,
-                "use_state_preprocessor": True,
-            },
-            stats,
-            check_bounds=True)
-        check_support("DQN", {"timesteps_per_iteration": 1}, stats)
-        check_support(
-            "A3C", {
-                "num_workers": 1,
-                "optimizer": {
-                    "grads_per_step": 1
-                }
-            },
-            stats,
-            check_bounds=True)
-        check_support(
-            "PPO", {
-                "num_workers": 1,
-                "num_sgd_iter": 1,
-                "train_batch_size": 10,
-                "sample_batch_size": 10,
-                "sgd_minibatch_size": 1,
-            },
-            stats,
-            check_bounds=True)
-        check_support(
-            "ES", {
-                "num_workers": 1,
-                "noise_size": 10000000,
-                "episodes_per_batch": 1,
-                "train_batch_size": 1
-            }, stats)
-        check_support(
-            "ARS", {
-                "num_workers": 1,
-                "noise_size": 10000000,
-                "num_rollouts": 1,
-                "rollouts_used": 1
-            }, stats)
-        check_support(
-            "PG", {
-                "num_workers": 1,
-                "optimizer": {}
-            },
-            stats,
-            check_bounds=True)
-        num_unexpected_errors = 0
-        for (alg, a_name, o_name), stat in sorted(stats.items()):
-            if stat not in ["ok", "unsupported", "skip"]:
-                num_unexpected_errors += 1
-            print(alg, "action_space", a_name, "obs_space", o_name, "result",
-                  stat)
-        self.assertEqual(num_unexpected_errors, 0)
+    def test_impala(self):
+        check_supported_spaces(
+            "IMPALA",
+            (
+                ImpalaConfig()
+                .resources(num_gpus=0)
+                .training(model={"fcnet_hiddens": [10]})
+            ),
+        )
 
-    def testMultiAgent(self):
-        check_support_multiagent(
-            "APEX", {
-                "num_workers": 2,
-                "timesteps_per_iteration": 1000,
-                "num_gpus": 0,
-                "min_iter_time_s": 1,
-                "learning_starts": 1000,
-                "target_network_update_freq": 100,
-            })
-        check_support_multiagent(
-            "APEX_DDPG", {
-                "num_workers": 2,
-                "timesteps_per_iteration": 1000,
-                "num_gpus": 0,
-                "min_iter_time_s": 1,
-                "learning_starts": 1000,
-                "target_network_update_freq": 100,
-                "use_state_preprocessor": True,
-            })
-        check_support_multiagent("IMPALA", {"num_gpus": 0})
-        check_support_multiagent("DQN", {"timesteps_per_iteration": 1})
-        check_support_multiagent("A3C", {
-            "num_workers": 1,
-            "optimizer": {
-                "grads_per_step": 1
-            }
-        })
-        check_support_multiagent(
-            "PPO", {
-                "num_workers": 1,
-                "num_sgd_iter": 1,
-                "train_batch_size": 10,
-                "sample_batch_size": 10,
-                "sgd_minibatch_size": 1,
-            })
-        check_support_multiagent("PG", {"num_workers": 1, "optimizer": {}})
-        check_support_multiagent("DDPG", {
-            "timesteps_per_iteration": 1,
-            "use_state_preprocessor": True,
-        })
+
+class TestSupportedSpacesAPPO(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_appo(self):
+        config = (
+            APPOConfig()
+            .resources(num_gpus=0)
+            .training(vtrace=False, model={"fcnet_hiddens": [10]})
+        )
+        config.training(vtrace=True)
+        check_supported_spaces("APPO", config)
+
+
+class TestSupportedSpacesA3C(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_a3c(self):
+        config = (
+            A3CConfig()
+            .rollouts(num_rollout_workers=1)
+            .training(
+                optimizer={"grads_per_step": 1},
+                model={"fcnet_hiddens": [10]},
+            )
+        )
+        check_supported_spaces("A3C", config, check_bounds=True)
+
+
+class TestSupportedSpacesPPO(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_ppo(self):
+        config = (
+            PPOConfig()
+            .rollouts(num_rollout_workers=2, rollout_fragment_length=50)
+            .training(
+                train_batch_size=100,
+                num_sgd_iter=1,
+                sgd_minibatch_size=50,
+                model={
+                    "fcnet_hiddens": [10],
+                },
+            )
+        )
+        check_supported_spaces("PPO", config, check_bounds=True)
+
+
+class TestSupportedSpacesPPONoPreprocessorGPU(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init(num_gpus=1)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_ppo_no_preprocessors_gpu(self):
+        # Same test as test_ppo, but also test if we are able to move models and tensors
+        # on the same device when not using preprocessors.
+        # (Artur) This covers a superposition of these edge cases that can lead to
+        # obscure errors.
+        config = (
+            PPOConfig()
+            .rollouts(num_rollout_workers=2, rollout_fragment_length=50)
+            .training(
+                train_batch_size=100,
+                num_sgd_iter=1,
+                sgd_minibatch_size=50,
+                model={
+                    "fcnet_hiddens": [10],
+                },
+            )
+            .experimental(_disable_preprocessor_api=True)
+            .resources(num_gpus=1)
+        )
+
+        # (Artur): This test only works under the old ModelV2 API because we
+        # don't offer arbitrarily complex Models under the RLModules API without
+        # preprocessors. Such input spaces require custom implementations of the
+        # input space.
+        # TODO (Artur): Delete this test once we remove ModelV2 API.
+        config.rl_module(_enable_rl_module_api=False).training(
+            _enable_learner_api=False
+        )
+
+        check_supported_spaces(
+            "PPO",
+            config,
+            check_bounds=True,
+            frameworks=["torch", "tf"],
+            use_gpu=True,
+        )
+
+
+class TestSupportedSpacesDQN(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_dqn(self):
+        config = (
+            DQNConfig()
+            .reporting(min_sample_timesteps_per_iteration=1)
+            .training(
+                replay_buffer_config={
+                    "capacity": 1000,
+                }
+            )
+        )
+        check_supported_spaces("DQN", config, frameworks=["tf2", "torch", "tf"])
+
+
+class TestSupportedSpacesOffPolicy(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init(num_cpus=4)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_ddpg(self):
+        check_supported_spaces(
+            "DDPG",
+            DDPGConfig()
+            .exploration(exploration_config={"ou_base_scale": 100.0})
+            .reporting(min_sample_timesteps_per_iteration=1)
+            .training(
+                replay_buffer_config={"capacity": 1000},
+                use_state_preprocessor=True,
+            ),
+            check_bounds=True,
+        )
+
+    def test_sac(self):
+        check_supported_spaces(
+            "SAC",
+            SACConfig().training(replay_buffer_config={"capacity": 1000}),
+            check_bounds=True,
+        )
+
+
+class TestSupportedSpacesEvolutionAlgos(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        ray.init(num_cpus=4)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        ray.shutdown()
+
+    def test_ars(self):
+        check_supported_spaces(
+            "ARS",
+            ARSConfig()
+            .rollouts(num_rollout_workers=1)
+            .training(noise_size=1500000, num_rollouts=1, rollouts_used=1),
+            # framework=None corresponds to numpy since ARS uses a numpy policy
+            frameworks=[None],
+        )
+
+    def test_es(self):
+        check_supported_spaces(
+            "ES",
+            ESConfig()
+            .rollouts(num_rollout_workers=1)
+            .training(noise_size=1500000, episodes_per_batch=1, train_batch_size=1),
+            # framework=None corresponds to numpy since ES uses a numpy policy
+            frameworks=[None],
+        )
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--smoke":
-        ACTION_SPACES_TO_TEST = {
-            "discrete": Discrete(5),
-        }
-        OBSERVATION_SPACES_TO_TEST = {
-            "vector": Box(0.0, 1.0, (5, ), dtype=np.float32),
-            "atari": Box(0.0, 1.0, (210, 160, 3), dtype=np.float32),
-        }
-    unittest.main(verbosity=2)
+    import pytest
+    import sys
+
+    # One can specify the specific TestCase class to run.
+    # None for all unittest.TestCase classes in this file.
+    class_ = sys.argv[1] if len(sys.argv) > 1 else None
+    sys.exit(pytest.main(["-v", __file__ + ("" if class_ is None else "::" + class_)]))

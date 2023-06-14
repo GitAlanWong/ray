@@ -1,11 +1,6 @@
 # Original Code here:
 # https://github.com/pytorch/examples/blob/master/mnist/main.py
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
-import numpy as np
 import argparse
 from filelock import FileLock
 import torch
@@ -15,8 +10,9 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 
 import ray
-from ray import tune
-from ray.tune import track
+from ray import air, tune
+from ray.air import session
+from ray.train.torch import TorchCheckpoint
 from ray.tune.schedulers import AsyncHyperBandScheduler
 
 # Change these values if you want the training to run quicker or slower.
@@ -37,7 +33,8 @@ class ConvNet(nn.Module):
         return F.log_softmax(x, dim=1)
 
 
-def train(model, optimizer, train_loader, device=torch.device("cpu")):
+def train(model, optimizer, train_loader, device=None):
+    device = device or torch.device("cpu")
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         if batch_idx * len(data) > EPOCH_SIZE:
@@ -50,7 +47,8 @@ def train(model, optimizer, train_loader, device=torch.device("cpu")):
         optimizer.step()
 
 
-def test(model, data_loader, device=torch.device("cpu")):
+def test(model, data_loader, device=None):
+    device = device or torch.device("cpu")
     model.eval()
     correct = 0
     total = 0
@@ -67,10 +65,10 @@ def test(model, data_loader, device=torch.device("cpu")):
     return correct / total
 
 
-def get_data_loaders():
+def get_data_loaders(batch_size=64):
     mnist_transforms = transforms.Compose(
-        [transforms.ToTensor(),
-         transforms.Normalize((0.1307, ), (0.3081, ))])
+        [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+    )
 
     # We add FileLock here because multiple workers will want to
     # download data, and this may cause overwrites since
@@ -78,68 +76,78 @@ def get_data_loaders():
     with FileLock(os.path.expanduser("~/data.lock")):
         train_loader = torch.utils.data.DataLoader(
             datasets.MNIST(
-                "~/data",
-                train=True,
-                download=True,
-                transform=mnist_transforms),
-            batch_size=64,
-            shuffle=True)
-    test_loader = torch.utils.data.DataLoader(
-        datasets.MNIST("~/data", train=False, transform=mnist_transforms),
-        batch_size=64,
-        shuffle=True)
+                "~/data", train=True, download=True, transform=mnist_transforms
+            ),
+            batch_size=batch_size,
+            shuffle=True,
+        )
+        test_loader = torch.utils.data.DataLoader(
+            datasets.MNIST(
+                "~/data", train=False, download=True, transform=mnist_transforms
+            ),
+            batch_size=batch_size,
+            shuffle=True,
+        )
     return train_loader, test_loader
 
 
 def train_mnist(config):
-    use_cuda = config.get("use_gpu") and torch.cuda.is_available()
+    should_checkpoint = config.get("should_checkpoint", False)
+    use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     train_loader, test_loader = get_data_loaders()
     model = ConvNet().to(device)
 
     optimizer = optim.SGD(
-        model.parameters(), lr=config["lr"], momentum=config["momentum"])
+        model.parameters(), lr=config["lr"], momentum=config["momentum"]
+    )
 
     while True:
         train(model, optimizer, train_loader, device)
         acc = test(model, test_loader, device)
-        track.log(mean_accuracy=acc)
+        checkpoint = None
+        if should_checkpoint:
+            checkpoint = TorchCheckpoint.from_state_dict(model.state_dict())
+        # Report metrics (and possibly a checkpoint) to Tune
+        session.report({"mean_accuracy": acc}, checkpoint=checkpoint)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
     parser.add_argument(
-        "--cuda",
-        action="store_true",
-        default=False,
-        help="Enables GPU training")
+        "--cuda", action="store_true", default=False, help="Enables GPU training"
+    )
     parser.add_argument(
-        "--smoke-test", action="store_true", help="Finish quickly for testing")
-    parser.add_argument(
-        "--ray-redis-address",
-        help="Address of Ray cluster for seamless distributed execution.")
-    args = parser.parse_args()
-    if args.ray_redis_address:
-        ray.init(redis_address=args.ray_redis_address)
-    sched = AsyncHyperBandScheduler(
-        time_attr="training_iteration", metric="mean_accuracy")
-    analysis = tune.run(
-        train_mnist,
-        name="exp",
-        scheduler=sched,
-        stop={
-            "mean_accuracy": 0.98,
-            "training_iteration": 5 if args.smoke_test else 100
-        },
-        resources_per_trial={
-            "cpu": 2,
-            "gpu": int(args.cuda)
-        },
-        num_samples=1 if args.smoke_test else 50,
-        config={
-            "lr": tune.sample_from(lambda spec: 10**(-10 * np.random.rand())),
-            "momentum": tune.uniform(0.1, 0.9),
-            "use_gpu": int(args.cuda)
-        })
+        "--smoke-test", action="store_true", help="Finish quickly for testing"
+    )
+    args, _ = parser.parse_known_args()
 
-    print("Best config is:", analysis.get_best_config(metric="mean_accuracy"))
+    ray.init(num_cpus=2 if args.smoke_test else None)
+
+    # for early stopping
+    sched = AsyncHyperBandScheduler()
+
+    resources_per_trial = {"cpu": 2, "gpu": int(args.cuda)}  # set this for GPUs
+    tuner = tune.Tuner(
+        tune.with_resources(train_mnist, resources=resources_per_trial),
+        tune_config=tune.TuneConfig(
+            metric="mean_accuracy",
+            mode="max",
+            scheduler=sched,
+            num_samples=1 if args.smoke_test else 50,
+        ),
+        run_config=air.RunConfig(
+            name="exp",
+            stop={
+                "mean_accuracy": 0.98,
+                "training_iteration": 5 if args.smoke_test else 100,
+            },
+        ),
+        param_space={
+            "lr": tune.loguniform(1e-4, 1e-2),
+            "momentum": tune.uniform(0.1, 0.9),
+        },
+    )
+    results = tuner.fit()
+
+    print("Best config is:", results.get_best_result().config)

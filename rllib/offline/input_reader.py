@@ -1,35 +1,35 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+from abc import ABCMeta, abstractmethod
 import logging
 import numpy as np
 import threading
 
 from ray.rllib.policy.sample_batch import MultiAgentBatch
 from ray.rllib.utils.annotations import PublicAPI
-from ray.rllib.utils import try_import_tf
+from ray.rllib.utils.framework import try_import_tf
+from typing import Dict, List
+from ray.rllib.utils.typing import TensorType, SampleBatchType
 
-tf = try_import_tf()
+tf1, tf, tfv = try_import_tf()
 
 logger = logging.getLogger(__name__)
 
 
 @PublicAPI
-class InputReader(object):
-    """Input object for loading experiences in policy evaluation."""
+class InputReader(metaclass=ABCMeta):
+    """API for collecting and returning experiences during policy evaluation."""
 
+    @abstractmethod
     @PublicAPI
-    def next(self):
-        """Return the next batch of experiences read.
+    def next(self) -> SampleBatchType:
+        """Returns the next batch of read experiences.
 
         Returns:
-            SampleBatch or MultiAgentBatch read.
+            The experience read (SampleBatch or MultiAgentBatch).
         """
         raise NotImplementedError
 
     @PublicAPI
-    def tf_input_ops(self, queue_size=1):
+    def tf_input_ops(self, queue_size: int = 1) -> Dict[str, TensorType]:
         """Returns TensorFlow queue ops for reading inputs from this reader.
 
         The main use of these ops is for integration into custom model losses.
@@ -39,11 +39,14 @@ class InputReader(object):
         This method creates a queue runner thread that will call next() on this
         reader repeatedly to feed the TensorFlow queue.
 
-        Arguments:
-            queue_size (int): Max elements to allow in the TF queue.
+        Args:
+            queue_size: Max elements to allow in the TF queue.
 
         Example:
-            >>> class MyModel(rllib.model.Model):
+            >>> from ray.rllib.models.modelv2 import ModelV2
+            >>> from ray.rllib.offline.json_reader import JsonReader
+            >>> imitation_loss = ... # doctest +SKIP
+            >>> class MyModel(ModelV2): # doctest +SKIP
             ...     def custom_loss(self, policy_loss, loss_inputs):
             ...         reader = JsonReader(...)
             ...         input_ops = reader.tf_input_ops()
@@ -56,30 +59,28 @@ class InputReader(object):
         You can find a runnable version of this in examples/custom_loss.py.
 
         Returns:
-            dict of Tensors, one for each column of the read SampleBatch.
+            Dict of Tensors, one for each column of the read SampleBatch.
         """
 
         if hasattr(self, "_queue_runner"):
             raise ValueError(
                 "A queue runner already exists for this input reader. "
-                "You can only call tf_input_ops() once per reader.")
+                "You can only call tf_input_ops() once per reader."
+            )
 
         logger.info("Reading initial batch of data from input reader.")
         batch = self.next()
         if isinstance(batch, MultiAgentBatch):
             raise NotImplementedError(
-                "tf_input_ops() is not implemented for multi agent batches")
+                "tf_input_ops() is not implemented for multi agent batches"
+            )
 
         keys = [
-            k for k in sorted(list(batch.keys()))
-            if np.issubdtype(batch[k].dtype, np.number)
+            k for k in sorted(batch.keys()) if np.issubdtype(batch[k].dtype, np.number)
         ]
         dtypes = [batch[k].dtype for k in keys]
-        shapes = {
-            k: (-1, ) + s[1:]
-            for (k, s) in [(k, batch[k].shape) for k in keys]
-        }
-        queue = tf.FIFOQueue(capacity=queue_size, dtypes=dtypes, names=keys)
+        shapes = {k: (-1,) + s[1:] for (k, s) in [(k, batch[k].shape) for k in keys]}
+        queue = tf1.FIFOQueue(capacity=queue_size, dtypes=dtypes, names=keys)
         tensors = queue.dequeue()
 
         logger.info("Creating TF queue runner for {}".format(self))
@@ -94,21 +95,24 @@ class InputReader(object):
 class _QueueRunner(threading.Thread):
     """Thread that feeds a TF queue from a InputReader."""
 
-    def __init__(self, input_reader, queue, keys, dtypes):
+    def __init__(
+        self,
+        input_reader: InputReader,
+        queue: "tf1.FIFOQueue",
+        keys: List[str],
+        dtypes: "tf.dtypes.DType",
+    ):
         threading.Thread.__init__(self)
-        self.sess = tf.get_default_session()
+        self.sess = tf1.get_default_session()
         self.daemon = True
         self.input_reader = input_reader
         self.keys = keys
         self.queue = queue
-        self.placeholders = [tf.placeholder(dtype) for dtype in dtypes]
+        self.placeholders = [tf1.placeholder(dtype) for dtype in dtypes]
         self.enqueue_op = queue.enqueue(dict(zip(keys, self.placeholders)))
 
-    def enqueue(self, batch):
-        data = {
-            self.placeholders[i]: batch[key]
-            for i, key in enumerate(self.keys)
-        }
+    def enqueue(self, batch: SampleBatchType):
+        data = {self.placeholders[i]: batch[key] for i, key in enumerate(self.keys)}
         self.sess.run(self.enqueue_op, feed_dict=data)
 
     def run(self):

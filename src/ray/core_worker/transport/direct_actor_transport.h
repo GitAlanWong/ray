@@ -1,148 +1,152 @@
-#ifndef RAY_CORE_WORKER_DIRECT_ACTOR_TRANSPORT_H
-#define RAY_CORE_WORKER_DIRECT_ACTOR_TRANSPORT_H
+// Copyright 2017 The Ray Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+#pragma once
+
+#include <boost/asio/thread_pool.hpp>
+#include <boost/thread.hpp>
 #include <list>
+#include <queue>
+#include <set>
+#include <utility>
 
-#include "ray/core_worker/object_interface.h"
-#include "ray/core_worker/transport/transport.h"
-#include "ray/gcs/redis_gcs_client.h"
-#include "ray/rpc/worker/direct_actor_client.h"
-#include "ray/rpc/worker/direct_actor_server.h"
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/synchronization/mutex.h"
+#include "ray/common/asio/instrumented_io_context.h"
+#include "ray/common/id.h"
+#include "ray/common/ray_object.h"
+#include "ray/core_worker/actor_creator.h"
+#include "ray/core_worker/actor_handle.h"
+#include "ray/core_worker/common.h"
+#include "ray/core_worker/context.h"
+#include "ray/core_worker/fiber.h"
+#include "ray/core_worker/store_provider/memory_store/memory_store.h"
+#include "ray/core_worker/task_manager.h"
+#include "ray/core_worker/transport/actor_scheduling_queue.h"
+#include "ray/core_worker/transport/concurrency_group_manager.h"
+#include "ray/core_worker/transport/dependency_resolver.h"
+#include "ray/core_worker/transport/direct_actor_task_submitter.h"
+#include "ray/core_worker/transport/normal_scheduling_queue.h"
+#include "ray/core_worker/transport/out_of_order_actor_scheduling_queue.h"
+#include "ray/core_worker/transport/thread_pool.h"
+#include "ray/rpc/grpc_server.h"
+#include "ray/rpc/worker/core_worker_client.h"
 
 namespace ray {
+namespace core {
 
-/// In direct actor call task submitter and receiver, a task is directly submitted
-/// to the actor that will execute it.
-
-/// The state data for an actor.
-struct ActorStateData {
-  ActorStateData(gcs::ActorTableData::ActorState state, const std::string &ip, int port)
-      : state_(state), location_(std::make_pair(ip, port)) {}
-
-  /// Actor's state (e.g. alive, dead, reconstrucing).
-  gcs::ActorTableData::ActorState state_;
-
-  /// IP address and port that the actor is listening on.
-  std::pair<std::string, int> location_;
-};
-
-class CoreWorkerDirectActorTaskSubmitter : public CoreWorkerTaskSubmitter {
+class CoreWorkerDirectTaskReceiver {
  public:
-  CoreWorkerDirectActorTaskSubmitter(
-      boost::asio::io_service &io_service, gcs::RedisGcsClient &gcs_client,
-      std::unique_ptr<CoreWorkerStoreProvider> store_provider);
+  using TaskHandler = std::function<Status(
+      const TaskSpecification &task_spec,
+      const std::shared_ptr<ResourceMappingType> resource_ids,
+      std::vector<std::pair<ObjectID, std::shared_ptr<RayObject>>> *return_objects,
+      std::vector<std::pair<ObjectID, std::shared_ptr<RayObject>>>
+          *dynamic_return_objects,
+      std::vector<std::pair<ObjectID, bool>> *streaming_generator_returns,
+      ReferenceCounter::ReferenceTableProto *borrower_refs,
+      bool *is_retryable_error,
+      std::string *application_error)>;
 
-  /// Submit a task to an actor for execution.
-  ///
-  /// \param[in] task The task spec to submit.
-  /// \return Status.
-  Status SubmitTask(const TaskSpecification &task_spec) override;
+  using OnTaskDone = std::function<Status()>;
 
- private:
-  /// Subscribe to all actor updates.
-  Status SubscribeActorUpdates();
+  CoreWorkerDirectTaskReceiver(WorkerContext &worker_context,
+                               instrumented_io_context &main_io_service,
+                               const TaskHandler &task_handler,
+                               const OnTaskDone &task_done)
+      : worker_context_(worker_context),
+        task_handler_(task_handler),
+        task_main_io_service_(main_io_service),
+        task_done_(task_done),
+        pool_manager_(std::make_shared<ConcurrencyGroupManager<BoundedExecutor>>()) {}
 
-  /// Push a task to a remote actor via the given client.
-  /// Note, this function doesn't return any error status code. If an error occurs while
-  /// sending the request, this task will be treated as failed.
-  ///
-  /// \param[in] client The RPC client to send tasks to an actor.
-  /// \param[in] request The request to send.
-  /// \param[in] task_id The ID of a task.
-  /// \param[in] num_returns Number of return objects.
-  /// \return Void.
-  void PushTask(rpc::DirectActorClient &client, const rpc::PushTaskRequest &request,
-                const TaskID &task_id, int num_returns);
+  /// Initialize this receiver. This must be called prior to use.
+  void Init(std::shared_ptr<rpc::CoreWorkerClientPool>,
+            rpc::Address rpc_address,
+            std::shared_ptr<DependencyWaiter> dependency_waiter);
 
-  /// Treat a task as failed.
-  ///
-  /// \param[in] task_id The ID of a task.
-  /// \param[in] num_returns Number of return objects.
-  /// \param[in] error_type The type of the specific error.
-  /// \return Void.
-  void TreatTaskAsFailed(const TaskID &task_id, int num_returns,
-                         const rpc::ErrorType &error_type);
-
-  /// Create connection to actor and send all pending tasks.
-  /// Note that this function doesn't take lock, the caller is expected to hold
-  /// `mutex_` before calling this function.
-  ///
-  /// \param[in] actor_id Actor ID.
-  /// \param[in] ip_address The ip address of the node that the actor is running on.
-  /// \param[in] port The port that the actor is listening on.
-  /// \return Void.
-  void ConnectAndSendPendingTasks(const ActorID &actor_id, std::string ip_address,
-                                  int port);
-
-  /// Whether the specified actor is alive.
-  ///
-  /// \param[in] actor_id The actor ID.
-  /// \return Whether this actor is alive.
-  bool IsActorAlive(const ActorID &actor_id) const;
-
-  /// The IO event loop.
-  boost::asio::io_service &io_service_;
-
-  /// Gcs client.
-  gcs::RedisGcsClient &gcs_client_;
-
-  /// The `ClientCallManager` object that is shared by all `DirectActorClient`s.
-  rpc::ClientCallManager client_call_manager_;
-
-  /// Mutex to proect the various maps below.
-  mutable std::mutex mutex_;
-
-  /// Map from actor id to actor state. This currently includes all actors in the system.
-  ///
-  /// TODO(zhijunfu): this map currently keeps track of all the actors in the system,
-  /// like `actor_registry_` in raylet. Later after new GCS client interface supports
-  /// subscribing updates for a specific actor, this will be updated to only include
-  /// entries for actors that the transport submits tasks to.
-  std::unordered_map<ActorID, ActorStateData> actor_states_;
-
-  /// Map from actor id to rpc client. This only includes actors that we send tasks to.
-  ///
-  /// TODO(zhijunfu): this will be moved into `actor_states_` later when we can
-  /// subscribe updates for a specific actor.
-  std::unordered_map<ActorID, std::unique_ptr<rpc::DirectActorClient>> rpc_clients_;
-
-  /// Map from actor id to the actor's pending requests.
-  std::unordered_map<ActorID, std::list<std::unique_ptr<rpc::PushTaskRequest>>>
-      pending_requests_;
-
-  /// The store provider.
-  std::unique_ptr<CoreWorkerStoreProvider> store_provider_;
-
-  friend class CoreWorkerTest;
-};
-
-class CoreWorkerDirectActorTaskReceiver : public CoreWorkerTaskReceiver,
-                                          public rpc::DirectActorHandler {
- public:
-  CoreWorkerDirectActorTaskReceiver(CoreWorkerObjectInterface &object_interface,
-                                    boost::asio::io_service &io_service,
-                                    rpc::GrpcServer &server,
-                                    const TaskHandler &task_handler);
-
-  /// Handle a `PushTask` request.
-  /// The implementation can handle this request asynchronously. When hanling is done, the
-  /// `done_callback` should be called.
+  /// Handle a `PushTask` request. If it's an actor request, this function will enqueue
+  /// the task and then start scheduling the requests to begin the execution. If it's a
+  /// non-actor request, this function will just enqueue the task.
   ///
   /// \param[in] request The request message.
   /// \param[out] reply The reply message.
-  /// \param[in] done_callback The callback to be called when the request is done.
-  void HandlePushTask(const rpc::PushTaskRequest &request, rpc::PushTaskReply *reply,
-                      rpc::SendReplyCallback send_reply_callback) override;
+  /// \param[in] send_reply_callback The callback to be called when the request is done.
+  void HandleTask(const rpc::PushTaskRequest &request,
+                  rpc::PushTaskReply *reply,
+                  rpc::SendReplyCallback send_reply_callback);
+
+  /// Pop tasks from the queue and execute them sequentially
+  void RunNormalTasksFromQueue();
+
+  bool CancelQueuedNormalTask(TaskID task_id);
+
+  void Stop();
+
+  /// Set the actor repr name for an actor.
+  ///
+  /// The actor repr name is only available after actor creation task has been run since
+  /// the repr name could include data only initialized during the creation task.
+  void SetActorReprName(const std::string &repr_name);
 
  private:
-  // Object interface.
-  CoreWorkerObjectInterface &object_interface_;
-  /// The rpc service for `DirectActorService`.
-  rpc::DirectActorGrpcService task_service_;
+  /// Set up the configs for an actor.
+  /// This should be called once for the actor creation task.
+  void SetupActor(bool is_asyncio, int fiber_max_concurrency, bool execute_out_of_order);
+
+ protected:
+  /// Cache the concurrency groups of actors.
+  absl::flat_hash_map<ActorID, std::vector<ConcurrencyGroup>> concurrency_groups_cache_;
+
+ private:
+  // Worker context.
+  WorkerContext &worker_context_;
   /// The callback function to process a task.
   TaskHandler task_handler_;
+  /// The IO event loop for running tasks on.
+  instrumented_io_context &task_main_io_service_;
+  /// The callback function to be invoked when finishing a task.
+  OnTaskDone task_done_;
+  /// Shared pool for producing new core worker clients.
+  std::shared_ptr<rpc::CoreWorkerClientPool> client_pool_;
+  /// Address of our RPC server.
+  rpc::Address rpc_address_;
+  /// Shared waiter for dependencies required by incoming tasks.
+  std::shared_ptr<DependencyWaiter> waiter_;
+  /// Queue of pending requests per actor handle.
+  /// TODO(ekl) GC these queues once the handle is no longer active.
+  absl::flat_hash_map<WorkerID, std::unique_ptr<SchedulingQueue>>
+      actor_scheduling_queues_;
+  // Queue of pending normal (non-actor) tasks.
+  std::unique_ptr<SchedulingQueue> normal_scheduling_queue_ =
+      std::make_unique<NormalSchedulingQueue>();
+  /// The max number of concurrent calls to allow for fiber mode.
+  /// 0 indicates that the value is not set yet.
+  int fiber_max_concurrency_ = 0;
+  /// If concurrent calls are allowed, holds the pools for executing these tasks.
+  std::shared_ptr<ConcurrencyGroupManager<BoundedExecutor>> pool_manager_;
+  /// Whether this actor use asyncio for concurrency.
+  bool is_asyncio_ = false;
+  /// Whether this actor executes tasks out of order with respect to client submission
+  /// order.
+  bool execute_out_of_order_ = false;
+  /// The repr name of the actor instance for an anonymous actor.
+  /// This is only available after the actor creation task.
+  std::string actor_repr_name_ = "";
 };
 
+}  // namespace core
 }  // namespace ray
-
-#endif  // RAY_CORE_WORKER_DIRECT_ACTOR_TRANSPORT_H

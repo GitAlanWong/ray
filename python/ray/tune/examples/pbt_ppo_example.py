@@ -4,17 +4,17 @@
 Note that this requires a cluster with at least 8 GPUs in order for all trials
 to run concurrently, otherwise PBT will round-robin train the trials which
 is less efficient (or you can set {"gpu": 0} to use CPUs for SGD instead).
-"""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+Note that Tune in general does not need 8 GPUs, and this is just a more
+computationally demanding example.
+"""
 
 import random
 
-import ray
-from ray.tune import run, sample_from
+from ray import air, tune
+from ray.rllib.algorithms.ppo import PPO
 from ray.tune.schedulers import PopulationBasedTraining
+
 
 if __name__ == "__main__":
 
@@ -30,8 +30,6 @@ if __name__ == "__main__":
 
     pbt = PopulationBasedTraining(
         time_attr="time_total_s",
-        metric="episode_reward_mean",
-        mode="max",
         perturbation_interval=120,
         resample_probability=0.25,
         # Specifies the mutations of these hyperparams
@@ -43,33 +41,36 @@ if __name__ == "__main__":
             "sgd_minibatch_size": lambda: random.randint(128, 16384),
             "train_batch_size": lambda: random.randint(2000, 160000),
         },
-        custom_explore_fn=explore)
+        custom_explore_fn=explore,
+    )
 
-    ray.init()
-    run(
-        "PPO",
-        name="pbt_humanoid_test",
-        scheduler=pbt,
-        **{
+    tuner = tune.Tuner(
+        PPO,
+        run_config=air.RunConfig(
+            name="pbt_humanoid_test",
+        ),
+        tune_config=tune.TuneConfig(
+            scheduler=pbt,
+            num_samples=8,
+            metric="episode_reward_mean",
+            mode="max",
+        ),
+        param_space={
             "env": "Humanoid-v1",
-            "num_samples": 8,
-            "config": {
-                "kl_coeff": 1.0,
-                "num_workers": 8,
-                "num_gpus": 1,
-                "model": {
-                    "free_log_std": True
-                },
-                # These params are tuned from a fixed starting value.
-                "lambda": 0.95,
-                "clip_param": 0.2,
-                "lr": 1e-4,
-                # These params start off randomly drawn from a set.
-                "num_sgd_iter": sample_from(
-                    lambda spec: random.choice([10, 20, 30])),
-                "sgd_minibatch_size": sample_from(
-                    lambda spec: random.choice([128, 512, 2048])),
-                "train_batch_size": sample_from(
-                    lambda spec: random.choice([10000, 20000, 40000]))
-            },
-        })
+            "kl_coeff": 1.0,
+            "num_workers": 8,
+            "num_gpus": 1,
+            "model": {"free_log_std": True},
+            # These params are tuned from a fixed starting value.
+            "lambda": 0.95,
+            "clip_param": 0.2,
+            "lr": 1e-4,
+            # These params start off randomly drawn from a set.
+            "num_sgd_iter": tune.choice([10, 20, 30]),
+            "sgd_minibatch_size": tune.choice([128, 512, 2048]),
+            "train_batch_size": tune.choice([10000, 20000, 40000]),
+        },
+    )
+    results = tuner.fit()
+
+    print("best hyperparameters: ", results.get_best_result().config)

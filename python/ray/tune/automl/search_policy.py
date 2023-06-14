@@ -1,16 +1,12 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import time
 import copy
 import logging
 
-from ray.tune.trial import Trial
-from ray.tune.suggest import SearchAlgorithm
-from ray.tune.experiment import convert_to_experiment_list
-from ray.tune.suggest.variant_generator import generate_variants
-from ray.tune.config_parser import make_parser, create_trial_from_spec
+from ray.tune.experiment import Trial
+from ray.tune.search import SearchAlgorithm
+from ray.tune.experiment import _convert_to_experiment_list
+from ray.tune.search.variant_generator import generate_variants
+from ray.tune.experiment.config_parser import _make_parser, _create_trial_from_spec
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +15,9 @@ def deep_insert(path_list, value, config):
     """Inserts value into config by path, generating intermediate dictionaries.
 
     Example:
-        >>> deep_insert(path.split("."), value, {})
+        >>> from os import path
+        >>> from ray.tune.automl.search_policy import deep_insert
+        >>> deep_insert(path.split("."), value, {}) # doctest: +SKIP
     """
     if len(path_list) > 1:
         inside_config = config.setdefault(path_list[0], {})
@@ -44,7 +42,7 @@ class AutoMLSearcher(SearchAlgorithm):
         """Initialize AutoMLSearcher.
 
         Arguments:
-            search_space (SearchSpace): The space to search.
+            search_space: The space to search.
             reward_attr: The attribute name of the reward in the result.
         """
         # Pass experiment later to allow construction without this parameter
@@ -56,26 +54,45 @@ class AutoMLSearcher(SearchAlgorithm):
         self.experiment_list = []
         self.best_trial = None
         self._is_finished = False
-        self._parser = make_parser()
+        self._parser = _make_parser()
         self._unfinished_count = 0
         self._running_trials = {}
         self._completed_trials = {}
+        self._next_trials = []
+        self._next_trial_iter = None
 
         self._iteration = 0
         self._total_trial_num = 0
         self._start_ts = 0
 
     def add_configurations(self, experiments):
-        self.experiment_list = convert_to_experiment_list(experiments)
+        self.experiment_list = _convert_to_experiment_list(experiments)
 
     def get_best_trial(self):
         """Returns the Trial object with the best reward_attr"""
         return self.best_trial
 
-    def next_trials(self):
+    def next_trial(self):
+        if not self._next_trial_iter:
+            self._generate_next_trials()
+            if not self._next_trials:
+                self.set_finished()
+                return None
+            self._next_trial_iter = iter(self._next_trials)
+
+        try:
+            return next(self._next_trial_iter)
+        except StopIteration:
+            self._next_trials = []
+            self._next_trial_iter = None
+            return None
+
+    def _generate_next_trials(self):
+        self._next_trials = []
+
         if self._unfinished_count > 0:
             # Last round not finished
-            return []
+            return
 
         trials = []
         raw_param_list, extra_arg_list = self._select()
@@ -90,14 +107,17 @@ class AutoMLSearcher(SearchAlgorithm):
                     tag += "%s=%s-" % (path.split(".")[-1], value)
                     deep_insert(path.split("."), value, new_spec["config"])
 
-                trial = create_trial_from_spec(
-                    new_spec, exp.name, self._parser, experiment_tag=tag)
+                trial = _create_trial_from_spec(
+                    new_spec, exp.dir_name, self._parser, experiment_tag=tag
+                )
 
                 # AutoML specific fields set in Trial
                 trial.results = []
                 trial.best_result = None
                 trial.param_config = param_config
                 trial.extra_arg = extra_arg
+
+                trial.invalidate_json_state()
 
                 trials.append(trial)
                 self._running_trials[trial.trial_id] = trial
@@ -109,12 +129,10 @@ class AutoMLSearcher(SearchAlgorithm):
         self._start_ts = time.time()
         logger.info(
             "=========== BEGIN Experiment-Round: %(round)s "
-            "[%(new)s NEW | %(total)s TOTAL] ===========", {
-                "round": self._iteration,
-                "new": ntrial,
-                "total": self._total_trial_num
-            })
-        return trials
+            "[%(new)s NEW | %(total)s TOTAL] ===========",
+            {"round": self._iteration, "new": ntrial, "total": self._total_trial_num},
+        )
+        self._next_trials = trials
 
     def on_trial_result(self, trial_id, result):
         if not result:
@@ -123,28 +141,27 @@ class AutoMLSearcher(SearchAlgorithm):
         trial = self._running_trials[trial_id]
         # Update trial's best result
         trial.results.append(result)
-        if trial.best_result is None \
-                or result[self.reward_attr] \
-                > trial.best_result[self.reward_attr]:
+        if (
+            trial.best_result is None
+            or result[self.reward_attr] > trial.best_result[self.reward_attr]
+        ):
             trial.best_result = result
+            trial.invalidate_json_state()
 
         # Update job's best trial
-        if self.best_trial is None \
-                or (result[self.reward_attr]
-                    > self.best_trial.best_result[self.reward_attr]):
+        if self.best_trial is None or (
+            result[self.reward_attr] > self.best_trial.best_result[self.reward_attr]
+        ):
             self.best_trial = self._running_trials[trial_id]
 
-    def on_trial_complete(self,
-                          trial_id,
-                          result=None,
-                          error=False,
-                          early_terminated=False):
+    def on_trial_complete(self, trial_id, result=None, error=False):
         self.on_trial_result(trial_id, result)
         self._unfinished_count -= 1
         if self._unfinished_count == 0:
             total = len(self._running_trials)
-            succ = sum(t.status == Trial.TERMINATED
-                       for t in self._running_trials.values())
+            succ = sum(
+                t.status == Trial.TERMINATED for t in self._running_trials.values()
+            )
             # handle the last trial
             this_trial = self._running_trials[trial_id]
             if this_trial.status == Trial.RUNNING and not error:
@@ -155,15 +172,18 @@ class AutoMLSearcher(SearchAlgorithm):
                 "=========== END Experiment-Round: %(round)s "
                 "[%(succ)s SUCC | %(fail)s FAIL] this round, "
                 "elapsed=%(elapsed).2f, "
-                "BEST %(reward_attr)s=%(reward)f ===========", {
+                "BEST %(reward_attr)s=%(reward)f ===========",
+                {
                     "round": self._iteration,
                     "succ": succ,
                     "fail": total - succ,
                     "elapsed": elapsed,
                     "reward_attr": self.reward_attr,
                     "reward": self.best_trial.best_result[self.reward_attr]
-                    if self.best_trial else None
-                })
+                    if self.best_trial
+                    else 0,
+                },
+            )
 
             action = self._feedback(self._running_trials.values())
             if action == AutoMLSearcher.TERMINATE:
@@ -198,7 +218,7 @@ class AutoMLSearcher(SearchAlgorithm):
         parameter permutations
 
         Arguments:
-            trials (list): A list of Trial object, where user can fetch the
+            trials: A list of Trial object, where user can fetch the
                 result attribute, etc.
 
         Returns:

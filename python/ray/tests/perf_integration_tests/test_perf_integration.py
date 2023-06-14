@@ -1,7 +1,3 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 import pytest
 
@@ -37,7 +33,10 @@ def warmup():
 def test_task_submission(benchmark, num_tasks):
     num_cpus = 16
     ray.init(
-        num_cpus=num_cpus, object_store_memory=10**7, ignore_reinit_error=True)
+        num_cpus=num_cpus,
+        object_store_memory=150 * 1024 * 1024,
+        ignore_reinit_error=True,
+    )
     # warm up the plasma store
     warmup()
     benchmark(benchmark_task_submission, num_tasks)
@@ -50,18 +49,20 @@ def benchmark_task_forward(f, num_tasks):
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize(
-    "num_tasks", [10**3, 10**4],
-    ids=[str(num) + "_tasks" for num in [10**3, 10**4]])
+    "num_tasks",
+    [10**3, 10**4],
+    ids=[str(num) + "_tasks" for num in [10**3, 10**4]],
+)
 def test_task_forward(benchmark, num_tasks):
     with _ray_start_cluster(
-            do_init=True,
-            num_nodes=1,
-            num_cpus=16,
-            object_store_memory=10**7,
+        do_init=True,
+        num_nodes=1,
+        num_cpus=16,
+        object_store_memory=150 * 1024 * 1024,
     ) as cluster:
         cluster.add_node(
             num_cpus=16,
-            object_store_memory=10**7,
+            object_store_memory=150 * 1024 * 1024,
             resources={"my_resource": 100},
         )
 
@@ -74,29 +75,30 @@ def test_task_forward(benchmark, num_tasks):
         benchmark(benchmark_task_forward, f, num_tasks)
 
 
-def benchmark_transfer_object(actor, object_ids):
-    ray.get(actor.f.remote(object_ids))
+def benchmark_transfer_object(actor, object_refs):
+    ray.get(actor.f.remote(object_refs))
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("object_number, data_size",
-                         [(10000, 500), (10000, 5000), (1000, 500),
-                          (1000, 5000)])
-def test_transfer_performance(benchmark, ray_start_cluster_head, object_number,
-                              data_size):
+@pytest.mark.parametrize(
+    "object_number, data_size", [(10000, 500), (10000, 5000), (1000, 500), (1000, 5000)]
+)
+def test_transfer_performance(
+    benchmark, ray_start_cluster_head, object_number, data_size
+):
     cluster = ray_start_cluster_head
     cluster.add_node(resources={"my_resource": 1}, object_store_memory=10**9)
 
     @ray.remote(resources={"my_resource": 1})
     class ObjectActor:
-        def f(self, object_ids):
-            ray.get(object_ids)
+        def f(self, object_refs):
+            ray.get(object_refs)
 
     # setup remote actor
     actor = ObjectActor.remote()
     actor.f.remote([])
 
     data = bytes(1) * data_size
-    object_ids = [ray.put(data) for _ in range(object_number)]
+    object_refs = [ray.put(data) for _ in range(object_number)]
 
-    benchmark(benchmark_transfer_object, actor, object_ids)
+    benchmark(benchmark_transfer_object, actor, object_refs)

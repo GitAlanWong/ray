@@ -1,17 +1,63 @@
-#ifndef RAY_RPC_GRPC_SERVER_H
-#define RAY_RPC_GRPC_SERVER_H
+// Copyright 2017 The Ray Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+#pragma once
+
+#include <grpcpp/grpcpp.h>
+
+#include <boost/asio.hpp>
 #include <thread>
 #include <utility>
 
-#include <grpcpp/grpcpp.h>
-#include <boost/asio.hpp>
-
+#include "ray/common/asio/instrumented_io_context.h"
 #include "ray/common/status.h"
 #include "ray/rpc/server_call.h"
 
 namespace ray {
 namespace rpc {
+/// \param MAX_ACTIVE_RPCS Maximum number of RPCs to handle at the same time. -1 means no
+/// limit.
+#define _RPC_SERVICE_HANDLER(SERVICE, HANDLER, MAX_ACTIVE_RPCS, RECORD_METRICS) \
+  std::unique_ptr<ServerCallFactory> HANDLER##_call_factory(                    \
+      new ServerCallFactoryImpl<SERVICE,                                        \
+                                SERVICE##Handler,                               \
+                                HANDLER##Request,                               \
+                                HANDLER##Reply>(                                \
+          service_,                                                             \
+          &SERVICE::AsyncService::Request##HANDLER,                             \
+          service_handler_,                                                     \
+          &SERVICE##Handler::Handle##HANDLER,                                   \
+          cq,                                                                   \
+          main_service_,                                                        \
+          #SERVICE ".grpc_server." #HANDLER,                                    \
+          MAX_ACTIVE_RPCS,                                                      \
+          RECORD_METRICS));                                                     \
+  server_call_factories->emplace_back(std::move(HANDLER##_call_factory));
+
+/// Define a RPC service handler with gRPC server metrics enabled.
+#define RPC_SERVICE_HANDLER(SERVICE, HANDLER, MAX_ACTIVE_RPCS) \
+  _RPC_SERVICE_HANDLER(SERVICE, HANDLER, MAX_ACTIVE_RPCS, true)
+
+/// Define a RPC service handler with gRPC server metrics disabled.
+#define RPC_SERVICE_HANDLER_SERVER_METRICS_DISABLED(SERVICE, HANDLER, MAX_ACTIVE_RPCS) \
+  _RPC_SERVICE_HANDLER(SERVICE, HANDLER, MAX_ACTIVE_RPCS, false)
+
+// Define a void RPC client method.
+#define DECLARE_VOID_RPC_SERVICE_HANDLER_METHOD(METHOD)            \
+  virtual void Handle##METHOD(::ray::rpc::METHOD##Request request, \
+                              ::ray::rpc::METHOD##Reply *reply,    \
+                              ::ray::rpc::SendReplyCallback send_reply_callback) = 0;
 
 class GrpcService;
 
@@ -31,8 +77,11 @@ class GrpcServer {
   /// \param[in] name Name of this server, used for logging and debugging purpose.
   /// \param[in] port The port to bind this server to. If it's 0, a random available port
   ///  will be chosen.
-  GrpcServer(std::string name, const uint32_t port)
-      : name_(std::move(name)), port_(port), is_closed_(true) {}
+  GrpcServer(std::string name,
+             const uint32_t port,
+             bool listen_to_localhost_only,
+             int num_threads = 1,
+             int64_t keepalive_time_ms = 7200000 /*2 hours, grpc default*/);
 
   /// Destruct this gRPC server.
   ~GrpcServer() { Shutdown(); }
@@ -41,15 +90,7 @@ class GrpcServer {
   void Run();
 
   // Shutdown this server
-  void Shutdown() {
-    if (!is_closed_) {
-      server_->Shutdown();
-      cq_->Shutdown();
-      polling_thread_.join();
-      is_closed_ = true;
-      RAY_LOG(DEBUG) << "gRPC server of " << name_ << " shutdown.";
-    }
-  }
+  void Shutdown();
 
   /// Get the port of this gRPC server.
   int GetPort() const { return port_; }
@@ -60,31 +101,41 @@ class GrpcServer {
   ///
   /// \param[in] service A `GrpcService` to register to this server.
   void RegisterService(GrpcService &service);
+  void RegisterService(grpc::Service &service);
+
+  grpc::Server &GetServer() { return *server_; }
 
  protected:
   /// This function runs in a background thread. It keeps polling events from the
   /// `ServerCompletionQueue`, and dispaches the event to the `ServiceHandler` instances
   /// via the `ServerCall` objects.
-  void PollEventsFromCompletionQueue();
+  void PollEventsFromCompletionQueue(int index);
 
   /// Name of this server, used for logging and debugging purpose.
   const std::string name_;
   /// Port of this server.
   int port_;
+  /// Listen to localhost (127.0.0.1) only if it's true, otherwise listen to all network
+  /// interfaces (0.0.0.0)
+  const bool listen_to_localhost_only_;
   /// Indicates whether this server has been closed.
   bool is_closed_;
   /// The `grpc::Service` objects which should be registered to `ServerBuilder`.
   std::vector<std::reference_wrapper<grpc::Service>> services_;
-  /// The `ServerCallFactory` objects, and the maximum number of concurrent requests that
-  /// this gRPC server can handle.
-  std::vector<std::pair<std::unique_ptr<ServerCallFactory>, int>>
-      server_call_factories_and_concurrencies_;
+  /// The `ServerCallFactory` objects.
+  std::vector<std::unique_ptr<ServerCallFactory>> server_call_factories_;
+  /// The number of completion queues the server is polling from.
+  int num_threads_;
   /// The `ServerCompletionQueue` object used for polling events.
-  std::unique_ptr<grpc::ServerCompletionQueue> cq_;
+  std::vector<std::unique_ptr<grpc::ServerCompletionQueue>> cqs_;
   /// The `Server` object.
   std::unique_ptr<grpc::Server> server_;
-  /// The polling thread used to check the completion queue.
-  std::thread polling_thread_;
+  /// The polling threads used to check the completion queues.
+  std::vector<std::thread> polling_threads_;
+  /// The interval to send a new gRPC keepalive timeout from server -> client.
+  /// gRPC server cannot get the ping response within the time, it triggers
+  /// the watchdog timer fired error, which will close the connection.
+  const int64_t keepalive_time_ms_;
 };
 
 /// Base class that represents an abstract gRPC service.
@@ -97,11 +148,11 @@ class GrpcService {
   ///
   /// \param[in] main_service The main event loop, to which service handler functions
   /// will be posted.
-  explicit GrpcService(boost::asio::io_service &main_service)
+  explicit GrpcService(instrumented_io_context &main_service)
       : main_service_(main_service) {}
 
   /// Destruct this gRPC service.
-  ~GrpcService() = default;
+  virtual ~GrpcService() = default;
 
  protected:
   /// Return the underlying grpc::Service object for this class.
@@ -113,20 +164,17 @@ class GrpcService {
   /// server can handle.
   ///
   /// \param[in] cq The grpc completion queue.
-  /// \param[out] server_call_factories_and_concurrencies The `ServerCallFactory` objects,
+  /// \param[out] server_call_factories The `ServerCallFactory` objects,
   /// and the maximum number of concurrent requests that this gRPC server can handle.
   virtual void InitServerCallFactories(
       const std::unique_ptr<grpc::ServerCompletionQueue> &cq,
-      std::vector<std::pair<std::unique_ptr<ServerCallFactory>, int>>
-          *server_call_factories_and_concurrencies) = 0;
+      std::vector<std::unique_ptr<ServerCallFactory>> *server_call_factories) = 0;
 
   /// The main event loop, to which the service handler functions will be posted.
-  boost::asio::io_service &main_service_;
+  instrumented_io_context &main_service_;
 
   friend class GrpcServer;
 };
 
 }  // namespace rpc
 }  // namespace ray
-
-#endif

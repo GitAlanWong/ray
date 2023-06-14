@@ -1,45 +1,121 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+from typing import List, Optional, Union
 
-import ray
+from ray._private.client_mode_hook import client_mode_hook
+from ray._raylet import GcsClient
 
-_local = {}  # dict for local mode
+_initialized = False
+global_gcs_client = None
 
 
+def _internal_kv_reset():
+    global global_gcs_client, _initialized
+    global_gcs_client = None
+    _initialized = False
+
+
+def internal_kv_get_gcs_client():
+    return global_gcs_client
+
+
+def _initialize_internal_kv(gcs_client: GcsClient):
+    """Initialize the internal KV for use in other function calls."""
+    global global_gcs_client, _initialized
+    assert gcs_client is not None
+    global_gcs_client = gcs_client
+    _initialized = True
+
+
+@client_mode_hook
 def _internal_kv_initialized():
-    worker = ray.worker.get_global_worker()
-    return hasattr(worker, "mode") and worker.mode is not None
+    return global_gcs_client is not None
 
 
-def _internal_kv_get(key):
+@client_mode_hook
+def _internal_kv_get(
+    key: Union[str, bytes], *, namespace: Optional[Union[str, bytes]] = None
+) -> bytes:
     """Fetch the value of a binary key."""
 
-    worker = ray.worker.get_global_worker()
-    if worker.mode == ray.worker.LOCAL_MODE:
-        return _local.get(key)
+    if isinstance(key, str):
+        key = key.encode()
+    if isinstance(namespace, str):
+        namespace = namespace.encode()
+    assert isinstance(key, bytes)
+    return global_gcs_client.internal_kv_get(key, namespace)
 
-    return worker.redis_client.hget(key, "value")
+
+@client_mode_hook
+def _internal_kv_exists(
+    key: Union[str, bytes], *, namespace: Optional[Union[str, bytes]] = None
+) -> bool:
+    """Check key exists or not."""
+
+    if isinstance(key, str):
+        key = key.encode()
+    if isinstance(namespace, str):
+        namespace = namespace.encode()
+    assert isinstance(key, bytes)
+    return global_gcs_client.internal_kv_exists(key, namespace)
 
 
-def _internal_kv_put(key, value, overwrite=False):
+@client_mode_hook
+def _pin_runtime_env_uri(uri: str, *, expiration_s: int) -> None:
+    """Pin a runtime_env URI for expiration_s."""
+    return global_gcs_client.pin_runtime_env_uri(uri, expiration_s)
+
+
+@client_mode_hook
+def _internal_kv_put(
+    key: Union[str, bytes],
+    value: Union[str, bytes],
+    overwrite: bool = True,
+    *,
+    namespace: Optional[Union[str, bytes]] = None
+) -> bool:
     """Globally associates a value with a given binary key.
 
     This only has an effect if the key does not already have a value.
 
     Returns:
-        already_exists (bool): whether the value already exists.
+        already_exists: whether the value already exists.
     """
 
-    worker = ray.worker.get_global_worker()
-    if worker.mode == ray.worker.LOCAL_MODE:
-        exists = key in _local
-        if not exists or overwrite:
-            _local[key] = value
-        return exists
+    if isinstance(key, str):
+        key = key.encode()
+    if isinstance(value, str):
+        value = value.encode()
+    if isinstance(namespace, str):
+        namespace = namespace.encode()
+    assert (
+        isinstance(key, bytes)
+        and isinstance(value, bytes)
+        and isinstance(overwrite, bool)
+    )
+    return global_gcs_client.internal_kv_put(key, value, overwrite, namespace) == 0
 
-    if overwrite:
-        updated = worker.redis_client.hset(key, "value", value)
-    else:
-        updated = worker.redis_client.hsetnx(key, "value", value)
-    return updated == 0  # already exists
+
+@client_mode_hook
+def _internal_kv_del(
+    key: Union[str, bytes],
+    *,
+    del_by_prefix: bool = False,
+    namespace: Optional[Union[str, bytes]] = None
+) -> int:
+    if isinstance(key, str):
+        key = key.encode()
+    if isinstance(namespace, str):
+        namespace = namespace.encode()
+    assert isinstance(key, bytes)
+    return global_gcs_client.internal_kv_del(key, del_by_prefix, namespace)
+
+
+@client_mode_hook
+def _internal_kv_list(
+    prefix: Union[str, bytes], *, namespace: Optional[Union[str, bytes]] = None
+) -> List[bytes]:
+    """List all keys in the internal KV store that start with the prefix."""
+    if isinstance(prefix, str):
+        prefix = prefix.encode()
+    if isinstance(namespace, str):
+        namespace = namespace.encode()
+    return global_gcs_client.internal_kv_keys(prefix, namespace)

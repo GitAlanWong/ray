@@ -1,25 +1,23 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from ray.rllib.utils.annotations import DeveloperAPI
 
 import logging
 import time
 import base64
 import numpy as np
-import pyarrow
-from six import string_types
+from ray import cloudpickle as pickle
 
 logger = logging.getLogger(__name__)
 
 try:
     import lz4.frame
+
     LZ4_ENABLED = True
 except ImportError:
-    logger.warning("lz4 not available, disabling sample compression. "
-                   "This will significantly impact RLlib performance. "
-                   "To install lz4, run `pip install lz4`.")
+    logger.warning(
+        "lz4 not available, disabling sample compression. "
+        "This will significantly impact RLlib performance. "
+        "To install lz4, run `pip install lz4`."
+    )
     LZ4_ENABLED = False
 
 
@@ -31,7 +29,7 @@ def compression_supported():
 @DeveloperAPI
 def pack(data):
     if LZ4_ENABLED:
-        data = pyarrow.serialize(data).to_buffer().to_pybytes()
+        data = pickle.dumps(data)
         data = lz4.frame.compress(data)
         # TODO(ekl) we shouldn't need to base64 encode this data, but this
         # seems to not survive a transfer through the object store if we don't.
@@ -51,7 +49,7 @@ def unpack(data):
     if LZ4_ENABLED:
         data = base64.b64decode(data)
         data = lz4.frame.decompress(data)
-        data = pyarrow.deserialize(data)
+        data = pickle.loads(data)
     return data
 
 
@@ -64,7 +62,7 @@ def unpack_if_needed(data):
 
 @DeveloperAPI
 def is_compressed(data):
-    return isinstance(data, bytes) or isinstance(data, string_types)
+    return isinstance(data, bytes) or isinstance(data, str)
 
 
 # Intel(R) Core(TM) i7-4600U CPU @ 2.10GHz

@@ -1,7 +1,3 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import random
 import logging
 import numpy as np
@@ -11,30 +7,28 @@ from ray.tune import grid_search
 logger = logging.getLogger(__name__)
 
 
-class ParameterSpace(object):
-    """Base class of a single parameter's search space.
-    """
+class ParameterSpace:
+    """Base class of a single parameter's search space."""
 
-    def __init__(self, name):
+    def __init__(self, name: str):
         """Initialize ParameterSpace.
 
         Arguments:
-            name (str): Name of the parameter. Name can be dot separated,
+            name: Name of the parameter. Name can be dot separated,
                 which will be interpreted as path of a nested config
         """
         self.name = name
 
 
 class DiscreteSpace(ParameterSpace):
-    """Search space with discrete choices.
-    """
+    """Search space with discrete choices."""
 
-    def __init__(self, name, choices):
+    def __init__(self, name: str, choices: list):
         """Initialize DiscreteSpace.
 
         Arguments:
-            name (str): Name of the parameter.
-            choices (list): List of all possible choices.
+            name: Name of the parameter.
+            choices: List of all possible choices.
         """
         super(DiscreteSpace, self).__init__(name)
         self.choices = choices
@@ -71,11 +65,11 @@ class ContinuousSpace(ParameterSpace):
 
     # TODO: logspace
 
-    def __init__(self, name, start, end, num, distribution=LINEAR):
+    def __init__(self, name: str, start, end, num, distribution=LINEAR):
         """Initialize ContinuousSpace.
 
         Arguments:
-            name (str): Name of the parameter.
+            name: Name of the parameter.
             start: Start of the continuous space included.
             end: End of the continuous space included.
             num: Sampling count if possible.
@@ -89,8 +83,7 @@ class ContinuousSpace(ParameterSpace):
         if distribution == ContinuousSpace.LINEAR:
             self.choices = np.linspace(start, end, num)
         else:
-            raise NotImplementedError(
-                "Distribution %s not supported" % distribution)
+            raise NotImplementedError("Distribution %s not supported" % distribution)
 
         self.distribution = distribution
 
@@ -112,11 +105,10 @@ class ContinuousSpace(ParameterSpace):
         return len(self.choices)
 
     def __str__(self):
-        return "ContinuousSpace %s: [%s, %s]" % (self.name, self.start,
-                                                 self.end)
+        return "ContinuousSpace %s: [%s, %s]" % (self.name, self.start, self.end)
 
 
-class SearchSpace(object):
+class SearchSpace:
     """Collection of ``ParameterSpace``, a.k.a <name, space> pair.
 
     It's supposed to be used with a fixed experiment config, which
@@ -169,7 +161,7 @@ class SearchSpace(object):
 
 
         Arguments:
-            one_hot_encoding (list): A list of one hot encodings,
+            one_hot_encoding: A list of one hot encodings,
                 1 for each parameter. The shape of each encoding
                 should match that ``ParameterSpace``
 

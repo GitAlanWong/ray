@@ -1,4 +1,19 @@
+// Copyright 2017 The Ray Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include <signal.h>
+
 #include <cstdlib>
 #include <iostream>
 
@@ -8,8 +23,9 @@
 
 // This test just print some call stack information.
 namespace ray {
+#ifndef _WIN32
 
-void Sleep() { usleep(100000); }
+void Sleep() { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
 
 void TestSendSignal(const std::string &test_name, int signal) {
   pid_t pid;
@@ -77,14 +93,16 @@ TEST(SignalTest, SIGILL_Test) {
   }
 }
 
+#endif  // !_WIN32
 }  // namespace ray
 
 int main(int argc, char **argv) {
   InitShutdownRAII ray_log_shutdown_raii(ray::RayLog::StartRayLog,
-                                         ray::RayLog::ShutDownRayLog, argv[0],
+                                         ray::RayLog::ShutDownRayLog,
+                                         argv[0],
                                          ray::RayLogLevel::INFO,
                                          /*log_dir=*/"");
-  ray::RayLog::InstallFailureSignalHandler();
+  ray::RayLog::InstallFailureSignalHandler(argv[0]);
   ::testing::InitGoogleTest(&argc, argv);
   int failed = RUN_ALL_TESTS();
   return failed;

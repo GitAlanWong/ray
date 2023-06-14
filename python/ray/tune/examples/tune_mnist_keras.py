@@ -1,49 +1,40 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import argparse
-import numpy as np
-import keras
-from keras.datasets import mnist
-from keras.models import Sequential
-from keras.layers import (Dense, Dropout, Flatten, Conv2D, MaxPooling2D)
+import os
 
-from ray.tune.integration.keras import TuneReporterCallback
-from ray.tune.examples.utils import get_mnist_data, set_keras_threads
+from filelock import FileLock
+from tensorflow.keras.datasets import mnist
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--smoke-test", action="store_true", help="Finish quickly for testing")
-args, _ = parser.parse_known_args()
+import ray
+from ray import air, tune
+from ray.tune.schedulers import AsyncHyperBandScheduler
+from ray.tune.integration.keras import TuneReportCallback
 
 
-def train_mnist(config, reporter):
-    set_keras_threads(config["threads"])
+def train_mnist(config):
+    # https://github.com/tensorflow/tensorflow/issues/32159
+    import tensorflow as tf
+
     batch_size = 128
     num_classes = 10
     epochs = 12
 
-    x_train, y_train, x_test, y_test, input_shape = get_mnist_data()
-
-    model = Sequential()
-    model.add(
-        Conv2D(
-            32, kernel_size=(3, 3), activation="relu",
-            input_shape=input_shape))
-    model.add(Conv2D(64, (3, 3), activation="relu"))
-    model.add(MaxPooling2D(pool_size=(2, 2)))
-    model.add(Dropout(0.5))
-    model.add(Flatten())
-    model.add(Dense(config["hidden"], activation="relu"))
-    model.add(Dropout(0.5))
-    model.add(Dense(num_classes, activation="softmax"))
+    with FileLock(os.path.expanduser("~/.data.lock")):
+        (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    x_train, x_test = x_train / 255.0, x_test / 255.0
+    model = tf.keras.models.Sequential(
+        [
+            tf.keras.layers.Flatten(input_shape=(28, 28)),
+            tf.keras.layers.Dense(config["hidden"], activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(num_classes, activation="softmax"),
+        ]
+    )
 
     model.compile(
-        loss=keras.losses.categorical_crossentropy,
-        optimizer=keras.optimizers.SGD(
-            lr=config["lr"], momentum=config["momentum"]),
-        metrics=["accuracy"])
+        loss="sparse_categorical_crossentropy",
+        optimizer=tf.keras.optimizers.SGD(lr=config["lr"], momentum=config["momentum"]),
+        metrics=["accuracy"],
+    )
 
     model.fit(
         x_train,
@@ -52,41 +43,46 @@ def train_mnist(config, reporter):
         epochs=epochs,
         verbose=0,
         validation_data=(x_test, y_test),
-        callbacks=[TuneReporterCallback(reporter)])
+        callbacks=[TuneReportCallback({"mean_accuracy": "accuracy"})],
+    )
+
+
+def tune_mnist(num_training_iterations):
+    sched = AsyncHyperBandScheduler(
+        time_attr="training_iteration", max_t=400, grace_period=20
+    )
+
+    tuner = tune.Tuner(
+        tune.with_resources(train_mnist, resources={"cpu": 2, "gpu": 0}),
+        run_config=air.RunConfig(
+            name="exp",
+            stop={"mean_accuracy": 0.99, "training_iteration": num_training_iterations},
+        ),
+        tune_config=tune.TuneConfig(
+            scheduler=sched,
+            metric="mean_accuracy",
+            mode="max",
+            num_samples=10,
+        ),
+        param_space={
+            "threads": 2,
+            "lr": tune.uniform(0.001, 0.1),
+            "momentum": tune.uniform(0.1, 0.9),
+            "hidden": tune.randint(32, 512),
+        },
+    )
+    results = tuner.fit()
+    print("Best hyperparameters found were: ", results.get_best_result().config)
 
 
 if __name__ == "__main__":
-    import ray
-    from ray import tune
-    from ray.tune.schedulers import AsyncHyperBandScheduler
-    mnist.load_data()  # we do this on the driver because it's not threadsafe
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--smoke-test", action="store_true", help="Finish quickly for testing"
+    )
+    args, _ = parser.parse_known_args()
 
-    ray.init()
-    sched = AsyncHyperBandScheduler(
-        time_attr="training_iteration",
-        metric="mean_accuracy",
-        mode="max",
-        max_t=400,
-        grace_period=20)
+    if args.smoke_test:
+        ray.init(num_cpus=4)
 
-    tune.run(
-        train_mnist,
-        name="exp",
-        scheduler=sched,
-        stop={
-            "mean_accuracy": 0.99,
-            "training_iteration": 5 if args.smoke_test else 300
-        },
-        num_samples=10,
-        resources_per_trial={
-            "cpu": 2,
-            "gpu": 0
-        },
-        config={
-            "threads": 2,
-            "lr": tune.sample_from(lambda spec: np.random.uniform(0.001, 0.1)),
-            "momentum": tune.sample_from(
-                lambda spec: np.random.uniform(0.1, 0.9)),
-            "hidden": tune.sample_from(
-                lambda spec: np.random.randint(32, 512)),
-        })
+    tune_mnist(num_training_iterations=5 if args.smoke_test else 300)

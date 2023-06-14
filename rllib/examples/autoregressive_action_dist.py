@@ -1,4 +1,5 @@
-"""Example of specifying an autoregressive action distribution.
+"""
+Example of specifying an autoregressive action distribution.
 
 In an action space with multiple components (e.g., Tuple(a1, a2)), you might
 want a2 to be sampled based on the sampled value of a1, i.e.,
@@ -8,209 +9,202 @@ independently.
 To do this, you need both a custom model that implements the autoregressive
 pattern, and a custom action distribution class that leverages that model.
 This examples shows both.
+
+Related paper: https://arxiv.org/abs/1903.11524
+
+The example uses the CorrelatedActionsEnv where the agent observes a random
+number (0 or 1) and has to choose two actions a1 and a2.
+Action a1 should match the observation (+5 reward) and a2 should match a1
+(+5 reward).
+Since a2 should depend on a1, an autoregressive action dist makes sense.
+
+---
+To better understand the environment, run 1 manual train iteration and test
+loop without Tune:
+$ python autoregressive_action_dist.py --stop-iters 1 --no-tune
+
+Run this example with defaults (using Tune and autoregressive action dist):
+$ python autoregressive_action_dist.py
+Then run again without autoregressive actions:
+$ python autoregressive_action_dist.py --no-autoreg
+# TODO: Why does this lead to better results than autoregressive actions?
+Compare learning curve on TensorBoard:
+$ cd ~/ray-results/; tensorboard --logdir .
+
+Other options for running this example:
+$ python attention_net.py --help
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import gym
-from gym.spaces import Discrete, Tuple
 import argparse
-import random
+import os
 
 import ray
-from ray import tune
+from ray import air, tune
+from ray.rllib.examples.env.correlated_actions_env import CorrelatedActionsEnv
+from ray.rllib.examples.models.autoregressive_action_model import (
+    AutoregressiveActionModel,
+    TorchAutoregressiveActionModel,
+)
+from ray.rllib.examples.models.autoregressive_action_dist import (
+    BinaryAutoregressiveDistribution,
+    TorchBinaryAutoregressiveDistribution,
+)
 from ray.rllib.models import ModelCatalog
-from ray.rllib.models.tf.tf_action_dist import Categorical, ActionDistribution
-from ray.rllib.models.tf.misc import normc_initializer
-from ray.rllib.models.tf.tf_modelv2 import TFModelV2
-from ray.rllib.policy.policy import TupleActions
-from ray.rllib.utils import try_import_tf
-
-tf = try_import_tf()
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--run", type=str, default="PPO")  # try PG, PPO, IMPALA
-parser.add_argument("--stop", type=int, default=200)
+from ray.rllib.utils.test_utils import check_learning_achieved
+from ray.tune.logger import pretty_print
+from ray.tune.registry import get_trainable_cls
 
 
-class CorrelatedActionsEnv(gym.Env):
-    """Simple env in which the policy has to emit a tuple of equal actions.
+def get_cli_args():
+    """Create CLI parser and return parsed arguments"""
+    parser = argparse.ArgumentParser()
 
-    The best score would be ~200 reward."""
+    # example-specific arg: disable autoregressive action dist
+    parser.add_argument(
+        "--no-autoreg",
+        action="store_true",
+        help="Do NOT use an autoregressive action distribution but normal,"
+        "independently distributed actions.",
+    )
 
-    def __init__(self, _):
-        self.observation_space = Discrete(2)
-        self.action_space = Tuple([Discrete(2), Discrete(2)])
+    # general args
+    parser.add_argument(
+        "--run", type=str, default="PPO", help="The RLlib-registered algorithm to use."
+    )
+    parser.add_argument(
+        "--framework",
+        choices=["tf", "tf2", "torch"],
+        default="torch",
+        help="The DL framework specifier.",
+    )
+    parser.add_argument("--num-cpus", type=int, default=0)
+    parser.add_argument(
+        "--as-test",
+        action="store_true",
+        help="Whether this script should be run as a test: --stop-reward must "
+        "be achieved within --stop-timesteps AND --stop-iters.",
+    )
+    parser.add_argument(
+        "--stop-iters", type=int, default=200, help="Number of iterations to train."
+    )
+    parser.add_argument(
+        "--stop-timesteps",
+        type=int,
+        default=100000,
+        help="Number of timesteps to train.",
+    )
+    parser.add_argument(
+        "--stop-reward",
+        type=float,
+        default=200.0,
+        help="Reward at which we stop training.",
+    )
+    parser.add_argument(
+        "--no-tune",
+        action="store_true",
+        help="Run without Tune using a manual train loop instead. Here,"
+        "there is no TensorBoard support.",
+    )
+    parser.add_argument(
+        "--local-mode",
+        action="store_true",
+        help="Init Ray in local mode for easier debugging.",
+    )
 
-    def reset(self):
-        self.t = 0
-        self.last = random.choice([0, 1])
-        return self.last
-
-    def step(self, action):
-        self.t += 1
-        a1, a2 = action
-        reward = 0
-        if a1 == self.last:
-            reward += 5
-        # encourage correlation between a1 and a2
-        if a1 == a2:
-            reward += 5
-        done = self.t > 20
-        self.last = random.choice([0, 1])
-        return self.last, reward, done, {}
-
-
-class BinaryAutoregressiveOutput(ActionDistribution):
-    """Action distribution P(a1, a2) = P(a1) * P(a2 | a1)"""
-
-    @staticmethod
-    def required_model_output_shape(self, model_config):
-        return 16  # controls model output feature vector size
-
-    def sample(self):
-        # first, sample a1
-        a1_dist = self._a1_distribution()
-        a1 = a1_dist.sample()
-
-        # sample a2 conditioned on a1
-        a2_dist = self._a2_distribution(a1)
-        a2 = a2_dist.sample()
-        self._action_logp = a1_dist.logp(a1) + a2_dist.logp(a2)
-
-        # return the action tuple
-        return TupleActions([a1, a2])
-
-    def logp(self, actions):
-        a1, a2 = actions[:, 0], actions[:, 1]
-        a1_vec = tf.expand_dims(tf.cast(a1, tf.float32), 1)
-        a1_logits, a2_logits = self.model.action_model([self.inputs, a1_vec])
-        return (
-            Categorical(a1_logits).logp(a1) + Categorical(a2_logits).logp(a2))
-
-    def sampled_action_logp(self):
-        return tf.exp(self._action_logp)
-
-    def entropy(self):
-        a1_dist = self._a1_distribution()
-        a2_dist = self._a2_distribution(a1_dist.sample())
-        return a1_dist.entropy() + a2_dist.entropy()
-
-    def kl(self, other):
-        a1_dist = self._a1_distribution()
-        a1_terms = a1_dist.kl(other._a1_distribution())
-
-        a1 = a1_dist.sample()
-        a2_terms = self._a2_distribution(a1).kl(other._a2_distribution(a1))
-        return a1_terms + a2_terms
-
-    def _a1_distribution(self):
-        BATCH = tf.shape(self.inputs)[0]
-        a1_logits, _ = self.model.action_model(
-            [self.inputs, tf.zeros((BATCH, 1))])
-        a1_dist = Categorical(a1_logits)
-        return a1_dist
-
-    def _a2_distribution(self, a1):
-        a1_vec = tf.expand_dims(tf.cast(a1, tf.float32), 1)
-        _, a2_logits = self.model.action_model([self.inputs, a1_vec])
-        a2_dist = Categorical(a2_logits)
-        return a2_dist
-
-
-class AutoregressiveActionsModel(TFModelV2):
-    """Implements the `.action_model` branch required above."""
-
-    def __init__(self, obs_space, action_space, num_outputs, model_config,
-                 name):
-        super(AutoregressiveActionsModel, self).__init__(
-            obs_space, action_space, num_outputs, model_config, name)
-        if action_space != Tuple([Discrete(2), Discrete(2)]):
-            raise ValueError(
-                "This model only supports the [2, 2] action space")
-
-        # Inputs
-        obs_input = tf.keras.layers.Input(
-            shape=obs_space.shape, name="obs_input")
-        a1_input = tf.keras.layers.Input(shape=(1, ), name="a1_input")
-        ctx_input = tf.keras.layers.Input(
-            shape=(num_outputs, ), name="ctx_input")
-
-        # Output of the model (normally 'logits', but for an autoregressive
-        # dist this is more like a context/feature layer encoding the obs)
-        context = tf.keras.layers.Dense(
-            num_outputs,
-            name="hidden",
-            activation=tf.nn.tanh,
-            kernel_initializer=normc_initializer(1.0))(obs_input)
-
-        # V(s)
-        value_out = tf.keras.layers.Dense(
-            1,
-            name="value_out",
-            activation=None,
-            kernel_initializer=normc_initializer(0.01))(context)
-
-        # P(a1 | obs)
-        a1_logits = tf.keras.layers.Dense(
-            2,
-            name="a1_logits",
-            activation=None,
-            kernel_initializer=normc_initializer(0.01))(ctx_input)
-
-        # P(a2 | a1)
-        # --note: typically you'd want to implement P(a2 | a1, obs) as follows:
-        # a2_context = tf.keras.layers.Concatenate(axis=1)(
-        #     [ctx_input, a1_input])
-        a2_context = a1_input
-        a2_hidden = tf.keras.layers.Dense(
-            16,
-            name="a2_hidden",
-            activation=tf.nn.tanh,
-            kernel_initializer=normc_initializer(1.0))(a2_context)
-        a2_logits = tf.keras.layers.Dense(
-            2,
-            name="a2_logits",
-            activation=None,
-            kernel_initializer=normc_initializer(0.01))(a2_hidden)
-
-        # Base layers
-        self.base_model = tf.keras.Model(obs_input, [context, value_out])
-        self.register_variables(self.base_model.variables)
-        self.base_model.summary()
-
-        # Autoregressive action sampler
-        self.action_model = tf.keras.Model([ctx_input, a1_input],
-                                           [a1_logits, a2_logits])
-        self.action_model.summary()
-        self.register_variables(self.action_model.variables)
-
-    def forward(self, input_dict, state, seq_lens):
-        context, self._value_out = self.base_model(input_dict["obs"])
-        return context, state
-
-    def value_function(self):
-        return tf.reshape(self._value_out, [-1])
+    args = parser.parse_args()
+    print(f"Running with following CLI args: {args}")
+    return args
 
 
 if __name__ == "__main__":
-    ray.init()
-    args = parser.parse_args()
-    ModelCatalog.register_custom_model("autoregressive_model",
-                                       AutoregressiveActionsModel)
-    ModelCatalog.register_custom_action_dist("binary_autoreg_output",
-                                             BinaryAutoregressiveOutput)
-    tune.run(
-        args.run,
-        stop={"episode_reward_mean": args.stop},
-        config={
-            "env": CorrelatedActionsEnv,
-            "gamma": 0.5,
-            "num_gpus": 0,
-            "model": {
+    args = get_cli_args()
+    ray.init(num_cpus=args.num_cpus or None, local_mode=args.local_mode)
+
+    # main part: register and configure autoregressive action model and dist
+    # here, tailored to the CorrelatedActionsEnv such that a2 depends on a1
+    ModelCatalog.register_custom_model(
+        "autoregressive_model",
+        TorchAutoregressiveActionModel
+        if args.framework == "torch"
+        else AutoregressiveActionModel,
+    )
+    ModelCatalog.register_custom_action_dist(
+        "binary_autoreg_dist",
+        TorchBinaryAutoregressiveDistribution
+        if args.framework == "torch"
+        else BinaryAutoregressiveDistribution,
+    )
+
+    # Generic config.
+    config = (
+        get_trainable_cls(args.run)
+        .get_default_config()
+        .environment(CorrelatedActionsEnv)
+        .framework(args.framework)
+        .training(gamma=0.5)
+        # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0.
+        .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "0")))
+    )
+
+    # Use registered model and dist in config.
+    if not args.no_autoreg:
+        config.model.update(
+            {
                 "custom_model": "autoregressive_model",
-                "custom_action_dist": "binary_autoreg_output",
-            },
-        })
+                "custom_action_dist": "binary_autoreg_dist",
+            }
+        )
+
+    # use stop conditions passed via CLI (or defaults)
+    stop = {
+        "training_iteration": args.stop_iters,
+        "timesteps_total": args.stop_timesteps,
+        "episode_reward_mean": args.stop_reward,
+    }
+
+    # manual training loop using PPO without ``Tuner.fit()``.
+    if args.no_tune:
+        if args.run != "PPO":
+            raise ValueError("Only support --run PPO with --no-tune.")
+        # Have to specify this here are we are working with a generic AlgorithmConfig
+        # object, not a specific one (e.g. PPOConfig).
+        config.algo_class = args.run
+        algo = config.build()
+        # run manual training loop and print results after each iteration
+        for _ in range(args.stop_iters):
+            result = algo.train()
+            print(pretty_print(result))
+            # stop training if the target train steps or reward are reached
+            if (
+                result["timesteps_total"] >= args.stop_timesteps
+                or result["episode_reward_mean"] >= args.stop_reward
+            ):
+                break
+
+        # run manual test loop: 1 iteration until done
+        print("Finished training. Running manual test/inference loop.")
+        env = CorrelatedActionsEnv(_)
+        obs, info = env.reset()
+        done = False
+        total_reward = 0
+        while not done:
+            a1, a2 = algo.compute_single_action(obs)
+            next_obs, reward, done, truncated, _ = env.step((a1, a2))
+            print(f"Obs: {obs}, Action: a1={a1} a2={a2}, Reward: {reward}")
+            obs = next_obs
+            total_reward += reward
+        print(f"Total reward in test episode: {total_reward}")
+        algo.stop()
+
+    # run with Tune for auto env and Algorithm creation and TensorBoard
+    else:
+        tuner = tune.Tuner(
+            args.run, run_config=air.RunConfig(stop=stop, verbose=2), param_space=config
+        )
+        results = tuner.fit()
+
+        if args.as_test:
+            print("Checking if learning goals were achieved")
+            check_learning_achieved(results, args.stop_reward)
+
+    ray.shutdown()

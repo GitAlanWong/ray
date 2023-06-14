@@ -1,74 +1,86 @@
-"""This test checks that Skopt is functional.
+"""This example demonstrates the usage of SkOpt with Ray Tune.
 
 It also checks that it is usable with a separate scheduler.
+
+Requires the SkOpt library to be installed (`pip install scikit-optimize`).
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import time
 
-import ray
-from ray.tune import run
+from ray import air, tune
+from ray.air import session
+from ray.tune.search import ConcurrencyLimiter
 from ray.tune.schedulers import AsyncHyperBandScheduler
-from ray.tune.suggest.skopt import SkOptSearch
+from ray.tune.search.skopt import SkOptSearch
 
 
-def easy_objective(config, reporter):
-    import time
-    time.sleep(0.2)
-    for i in range(config["iterations"]):
-        reporter(
-            timesteps_total=i,
-            mean_loss=(config["height"] - 14)**2 - abs(config["width"] - 3))
-        time.sleep(0.02)
+def evaluation_fn(step, width, height):
+    time.sleep(0.1)
+    return (0.1 + width * step / 100) ** (-1) + height * 0.1
+
+
+def easy_objective(config):
+    # Hyperparameters
+    width, height = config["width"], config["height"]
+
+    for step in range(config["steps"]):
+        # Iterative training function - can be any arbitrary training procedure
+        intermediate_score = evaluation_fn(step, width, height)
+        # Feed the score back back to Tune.
+        session.report({"iterations": step, "mean_loss": intermediate_score})
 
 
 if __name__ == "__main__":
     import argparse
-    from skopt import Optimizer
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--smoke-test", action="store_true", help="Finish quickly for testing")
+        "--smoke-test", action="store_true", help="Finish quickly for testing"
+    )
     args, _ = parser.parse_known_args()
-    ray.init()
 
-    config = {
-        "num_samples": 10 if args.smoke_test else 50,
-        "config": {
-            "iterations": 100,
-        },
-        "stop": {
-            "timesteps_total": 100
-        },
-    }
-    optimizer = Optimizer([(0, 20), (-100, 100)])
-    previously_run_params = [[10, 0], [15, -20]]
+    # The config will be automatically converted to SkOpt's search space
+
+    # Optional: Pass the parameter space yourself
+    # space = {
+    #     "width": (0, 20),
+    #     "height": (-100, 100),
+    #     "activation": ["relu", "tanh"]
+    # }
+
+    previously_run_params = [
+        {"width": 10, "height": 0, "activation": "relu"},  # Activation will be relu
+        {"width": 15, "height": -20, "activation": "tanh"},  # Activation will be tanh
+    ]
     known_rewards = [-189, -1144]
+
     algo = SkOptSearch(
-        optimizer, ["width", "height"],
-        max_concurrent=4,
-        metric="mean_loss",
-        mode="min",
+        # parameter_names=space.keys(),  # If you want to set the space
+        # parameter_ranges=space.values(), # If you want to set the space
         points_to_evaluate=previously_run_params,
-        evaluated_rewards=known_rewards)
-    scheduler = AsyncHyperBandScheduler(metric="mean_loss", mode="min")
-    run(easy_objective,
-        name="skopt_exp_with_warmstart",
-        search_alg=algo,
-        scheduler=scheduler,
-        **config)
+        evaluated_rewards=known_rewards,
+    )
+    algo = ConcurrencyLimiter(algo, max_concurrent=4)
 
-    # Now run the experiment without known rewards
+    scheduler = AsyncHyperBandScheduler()
 
-    algo = SkOptSearch(
-        optimizer, ["width", "height"],
-        max_concurrent=4,
-        metric="mean_loss",
-        mode="min",
-        points_to_evaluate=previously_run_params)
-    scheduler = AsyncHyperBandScheduler(metric="mean_loss", mode="min")
-    run(easy_objective,
-        name="skopt_exp",
-        search_alg=algo,
-        scheduler=scheduler,
-        **config)
+    tuner = tune.Tuner(
+        easy_objective,
+        tune_config=tune.TuneConfig(
+            metric="mean_loss",
+            mode="min",
+            search_alg=algo,
+            scheduler=scheduler,
+            num_samples=10 if args.smoke_test else 50,
+        ),
+        run_config=air.RunConfig(
+            name="skopt_exp_with_warmstart",
+        ),
+        param_space={
+            "steps": 100,
+            "width": tune.uniform(0, 20),
+            "height": tune.uniform(-100, 100),
+            "activation": tune.choice(["relu", "tanh"]),
+        },
+    )
+    results = tuner.fit()
+    print("Best hyperparameters found were: ", results.get_best_result().config)

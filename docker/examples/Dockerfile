@@ -1,17 +1,36 @@
 # The examples Docker image adds dependencies needed to run the examples
 
-FROM ray-project/deploy
+FROM rayproject/ray:latest
 
-# This updates numpy to 1.14 and mutes errors from other libraries
-RUN conda install -y numpy
-RUN apt-get install -y zlib1g-dev
-# The following is needed to support TensorFlow 1.14
-RUN conda remove -y --force wrapt
-RUN pip install gym[atari] opencv-python-headless tensorflow lz4 keras pytest-timeout smart_open tensorflow_probability
-RUN pip install -U h5py  # Mutes FutureWarnings
-RUN pip install --upgrade bayesian-optimization
-RUN pip install --upgrade git+git://github.com/hyperopt/hyperopt.git
-RUN pip install --upgrade sigopt nevergrad scikit-optimize hpbandster ConfigSpace
-RUN pip install -U mlflow
-RUN pip install -U pytest-remotedata>=0.3.1
-RUN conda install pytorch-cpu torchvision-cpu -c pytorch
+# Needed to run Tune example with a 'plot' call - which does not actually render a plot, but throws an error.
+RUN apt-get update && apt-get install -y zlib1g-dev libgl1-mesa-dev libgtk2.0-dev && apt-get clean
+RUN pip install --no-cache-dir -U pip \
+    autorom[accept-rom-license] \
+    gym[atari] \
+    scikit-image \
+    tensorflow \
+    lz4 \
+    pytest-timeout \
+    smart_open \
+    tensorflow_probability \
+    dm_tree \
+    h5py   # Mutes FutureWarnings \
+    bayesian-optimization \
+    hyperopt \
+    ConfigSpace==0.4.10 \
+    sigopt \ 
+    nevergrad \
+    scikit-optimize \
+    hpbandster \
+    lightgbm \
+    xgboost \
+    torch \
+    torchvision \
+    tensorboardX \
+    dragonfly-opt \
+    zoopt \
+    mlflow \
+    pytest-remotedata>=0.3.1 \
+    matplotlib \
+    jupyter \
+    pandas

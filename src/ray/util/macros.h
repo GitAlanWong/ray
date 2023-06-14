@@ -1,5 +1,18 @@
-#ifndef RAY_UTIL_MACROS_H
-#define RAY_UTIL_MACROS_H
+// Copyright 2017 The Ray Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
 
 // From Google gutil
 #ifndef RAY_DISALLOW_COPY_AND_ASSIGN
@@ -41,4 +54,15 @@
 #define RAY_MUST_USE_RESULT
 #endif
 
-#endif  // RAY_UTIL_MACROS_H
+// Suppress Undefined Behavior Sanitizer (recoverable only). Usage:
+// - __suppress_ubsan__("undefined")
+// - __suppress_ubsan__("signed-integer-overflow")
+// adaped from
+// https://github.com/google/flatbuffers/blob/master/include/flatbuffers/base.h
+#if defined(__clang__)
+#define __suppress_ubsan__(type) __attribute__((no_sanitize(type)))
+#elif defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__ >= 409)
+#define __suppress_ubsan__(type) __attribute__((no_sanitize_undefined))
+#else
+#define __suppress_ubsan__(type)
+#endif

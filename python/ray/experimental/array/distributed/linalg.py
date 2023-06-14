@@ -1,17 +1,13 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
-import ray.experimental.array.remote as ra
-import ray
 
+import ray
+import ray.experimental.array.remote as ra
 from . import core
 
 __all__ = ["tsqr", "modified_lu", "tsqr_hr", "qr"]
 
 
-@ray.remote(num_return_vals=2)
+@ray.remote(num_returns=2)
 def tsqr(a):
     """Perform a QR decomposition of a tall-skinny matrix.
 
@@ -28,25 +24,28 @@ def tsqr(a):
             - np.allclose(r, np.triu(r)) == True.
     """
     if len(a.shape) != 2:
-        raise Exception("tsqr requires len(a.shape) == 2, but a.shape is "
-                        "{}".format(a.shape))
+        raise Exception(
+            "tsqr requires len(a.shape) == 2, but a.shape is {}".format(a.shape)
+        )
     if a.num_blocks[1] != 1:
-        raise Exception("tsqr requires a.num_blocks[1] == 1, but a.num_blocks "
-                        "is {}".format(a.num_blocks))
+        raise Exception(
+            "tsqr requires a.num_blocks[1] == 1, but a.num_blocks "
+            "is {}".format(a.num_blocks)
+        )
 
     num_blocks = a.num_blocks[0]
     K = int(np.ceil(np.log2(num_blocks))) + 1
     q_tree = np.empty((num_blocks, K), dtype=object)
     current_rs = []
     for i in range(num_blocks):
-        block = a.objectids[i, 0]
+        block = a.object_refs[i, 0]
         q, r = ra.linalg.qr.remote(block)
         q_tree[i, 0] = q
         current_rs.append(r)
     for j in range(1, K):
         new_rs = []
         for i in range(int(np.ceil(1.0 * len(current_rs) / 2))):
-            stacked_rs = ra.vstack.remote(*current_rs[(2 * i):(2 * i + 2)])
+            stacked_rs = ra.vstack.remote(*current_rs[(2 * i) : (2 * i + 2)])
             q, r = ra.linalg.qr.remote(stacked_rs)
             q_tree[i, j] = q
             new_rs.append(r)
@@ -61,8 +60,8 @@ def tsqr(a):
     else:
         q_shape = [a.shape[0], a.shape[0]]
     q_num_blocks = core.DistArray.compute_num_blocks(q_shape)
-    q_objectids = np.empty(q_num_blocks, dtype=object)
-    q_result = core.DistArray(q_shape, q_objectids)
+    q_object_refs = np.empty(q_num_blocks, dtype=object)
+    q_result = core.DistArray(q_shape, q_object_refs)
 
     # reconstruct output
     for i in range(num_blocks):
@@ -77,9 +76,9 @@ def tsqr(a):
                 upper = [2 * a.shape[1], core.BLOCK_SIZE]
             ith_index //= 2
             q_block_current = ra.dot.remote(
-                q_block_current,
-                ra.subarray.remote(q_tree[ith_index, j], lower, upper))
-        q_result.objectids[i] = q_block_current
+                q_block_current, ra.subarray.remote(q_tree[ith_index, j], lower, upper)
+            )
+        q_result.object_refs[i] = q_block_current
     r = current_rs[0]
     return q_result, ray.get(r)
 
@@ -87,7 +86,7 @@ def tsqr(a):
 # TODO(rkn): This is unoptimized, we really want a block version of this.
 # This is Algorithm 5 from
 # http://www.eecs.berkeley.edu/Pubs/TechRpts/2013/EECS-2013-175.pdf.
-@ray.remote(num_return_vals=3)
+@ray.remote(num_returns=3)
 def modified_lu(q):
     """Perform a modified LU decomposition of a matrix.
 
@@ -112,10 +111,11 @@ def modified_lu(q):
         S[i] = -1 * np.sign(q_work[i, i])
         q_work[i, i] -= S[i]
         # Scale ith column of L by diagonal element.
-        q_work[(i + 1):m, i] /= q_work[i, i]
+        q_work[(i + 1) : m, i] /= q_work[i, i]
         # Perform Schur complement update.
-        q_work[(i + 1):m, (i + 1):b] -= np.outer(q_work[(i + 1):m, i],
-                                                 q_work[i, (i + 1):b])
+        q_work[(i + 1) : m, (i + 1) : b] -= np.outer(
+            q_work[(i + 1) : m, i], q_work[i, (i + 1) : b]
+        )
 
     L = np.tril(q_work)
     for i in range(b):
@@ -125,7 +125,7 @@ def modified_lu(q):
     return ray.get(core.numpy_to_dist.remote(ray.put(L))), U, S
 
 
-@ray.remote(num_return_vals=2)
+@ray.remote(num_returns=2)
 def tsqr_hr_helper1(u, s, y_top_block, b):
     y_top = y_top_block[:b, :b]
     s_full = np.diag(s)
@@ -141,13 +141,12 @@ def tsqr_hr_helper2(s, r_temp):
 
 # This is Algorithm 6 from
 # http://www.eecs.berkeley.edu/Pubs/TechRpts/2013/EECS-2013-175.pdf.
-@ray.remote(num_return_vals=4)
+@ray.remote(num_returns=4)
 def tsqr_hr(a):
     q, r_temp = tsqr.remote(a)
     y, u, s = modified_lu.remote(q)
     y_blocked = ray.get(y)
-    t, y_top = tsqr_hr_helper1.remote(u, s, y_blocked.objectids[0, 0],
-                                      a.shape[1])
+    t, y_top = tsqr_hr_helper1.remote(u, s, y_blocked.object_refs[0, 0], a.shape[1])
     r = tsqr_hr_helper2.remote(s, r_temp)
     return ray.get(y), ray.get(t), ray.get(y_top), ray.get(r)
 
@@ -164,16 +163,16 @@ def qr_helper2(y_ri, a_rc):
 
 # This is Algorithm 7 from
 # http://www.eecs.berkeley.edu/Pubs/TechRpts/2013/EECS-2013-175.pdf.
-@ray.remote(num_return_vals=2)
+@ray.remote(num_returns=2)
 def qr(a):
 
     m, n = a.shape[0], a.shape[1]
     k = min(m, n)
 
     # we will store our scratch work in a_work
-    a_work = core.DistArray(a.shape, np.copy(a.objectids))
+    a_work = core.DistArray(a.shape, np.copy(a.object_refs))
 
-    result_dtype = np.linalg.qr(ray.get(a.objectids[0, 0]))[0].dtype.name
+    result_dtype = np.linalg.qr(ray.get(a.object_refs[0, 0]))[0].dtype.name
     # TODO(rkn): It would be preferable not to get this right after creating
     # it.
     r_res = ray.get(core.zeros.remote([k, n], result_dtype))
@@ -187,33 +186,33 @@ def qr(a):
     # sense when a.num_blocks[1] > a.num_blocks[0].
     for i in range(min(a.num_blocks[0], a.num_blocks[1])):
         sub_dist_array = core.subblocks.remote(
-            a_work, list(range(i, a_work.num_blocks[0])), [i])
+            a_work, list(range(i, a_work.num_blocks[0])), [i]
+        )
         y, t, _, R = tsqr_hr.remote(sub_dist_array)
         y_val = ray.get(y)
 
         for j in range(i, a.num_blocks[0]):
-            y_res.objectids[j, i] = y_val.objectids[j - i, 0]
+            y_res.object_refs[j, i] = y_val.object_refs[j - i, 0]
         if a.shape[0] > a.shape[1]:
             # in this case, R needs to be square
             R_shape = ray.get(ra.shape.remote(R))
-            eye_temp = ra.eye.remote(
-                R_shape[1], R_shape[0], dtype_name=result_dtype)
-            r_res.objectids[i, i] = ra.dot.remote(eye_temp, R)
+            eye_temp = ra.eye.remote(R_shape[1], R_shape[0], dtype_name=result_dtype)
+            r_res.object_refs[i, i] = ra.dot.remote(eye_temp, R)
         else:
-            r_res.objectids[i, i] = R
+            r_res.object_refs[i, i] = R
         Ts.append(core.numpy_to_dist.remote(t))
 
         for c in range(i + 1, a.num_blocks[1]):
             W_rcs = []
             for r in range(i, a.num_blocks[0]):
-                y_ri = y_val.objectids[r - i, 0]
-                W_rcs.append(qr_helper2.remote(y_ri, a_work.objectids[r, c]))
+                y_ri = y_val.object_refs[r - i, 0]
+                W_rcs.append(qr_helper2.remote(y_ri, a_work.object_refs[r, c]))
             W_c = ra.sum_list.remote(*W_rcs)
             for r in range(i, a.num_blocks[0]):
-                y_ri = y_val.objectids[r - i, 0]
-                A_rc = qr_helper1.remote(a_work.objectids[r, c], y_ri, t, W_c)
-                a_work.objectids[r, c] = A_rc
-            r_res.objectids[i, c] = a_work.objectids[i, c]
+                y_ri = y_val.object_refs[r - i, 0]
+                A_rc = qr_helper1.remote(a_work.object_refs[r, c], y_ri, t, W_c)
+                a_work.object_refs[r, c] = A_rc
+            r_res.object_refs[i, c] = a_work.object_refs[i, c]
 
     # construct q_res from Ys and Ts
     q = core.eye.remote(m, k, dtype_name=result_dtype)
@@ -224,7 +223,9 @@ def qr(a):
             core.dot.remote(
                 y_col_block,
                 core.dot.remote(
-                    Ts[i],
-                    core.dot.remote(core.transpose.remote(y_col_block), q))))
+                    Ts[i], core.dot.remote(core.transpose.remote(y_col_block), q)
+                ),
+            ),
+        )
 
     return ray.get(q), r_res

@@ -1,12 +1,10 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from numpy.testing import assert_almost_equal
-import tensorflow as tf
 
 import ray
 import ray.experimental.tf_utils
+from ray.rllib.utils.framework import try_import_tf
+
+tf, _, _ = try_import_tf()
 
 
 def make_linear_network(w_name=None, b_name=None):
@@ -18,11 +16,15 @@ def make_linear_network(w_name=None, b_name=None):
     b = tf.Variable(tf.zeros([1]), name=b_name)
     y = w * x_data + b
     # Return the loss and weight initializer.
-    return (tf.reduce_mean(tf.square(y - y_data)),
-            tf.global_variables_initializer(), x_data, y_data)
+    return (
+        tf.reduce_mean(tf.square(y - y_data)),
+        tf.global_variables_initializer(),
+        x_data,
+        y_data,
+    )
 
 
-class LossActor(object):
+class LossActor:
     def __init__(self, use_loss=True):
         # Uses a separate graph for each network.
         with tf.Graph().as_default():
@@ -32,7 +34,8 @@ class LossActor(object):
             sess = tf.Session()
             # Additional code for setting and getting the weights.
             weights = ray.experimental.tf_utils.TensorFlowVariables(
-                loss if use_loss else None, sess, input_variables=var)
+                loss if use_loss else None, sess, input_variables=var
+            )
         # Return all of the data needed to use the network.
         self.values = [weights, init, sess]
         sess.run(init)
@@ -45,7 +48,7 @@ class LossActor(object):
         return self.values[0].get_weights()
 
 
-class NetActor(object):
+class NetActor:
     def __init__(self):
         # Uses a separate graph for each network.
         with tf.Graph().as_default():
@@ -53,8 +56,7 @@ class NetActor(object):
             loss, init, _, _ = make_linear_network()
             sess = tf.Session()
             # Additional code for setting and getting the weights.
-            variables = ray.experimental.tf_utils.TensorFlowVariables(
-                loss, sess)
+            variables = ray.experimental.tf_utils.TensorFlowVariables(loss, sess)
         # Return all of the data needed to use the network.
         self.values = [variables, init, sess]
         sess.run(init)
@@ -67,21 +69,18 @@ class NetActor(object):
         return self.values[0].get_weights()
 
 
-class TrainActor(object):
+class TrainActor:
     def __init__(self):
         # Almost the same as above, but now returns the placeholders and
         # gradient.
         with tf.Graph().as_default():
             loss, init, x_data, y_data = make_linear_network()
             sess = tf.Session()
-            variables = ray.experimental.tf_utils.TensorFlowVariables(
-                loss, sess)
+            variables = ray.experimental.tf_utils.TensorFlowVariables(loss, sess)
             optimizer = tf.train.GradientDescentOptimizer(0.9)
             grads = optimizer.compute_gradients(loss)
             train = optimizer.apply_gradients(grads)
-        self.values = [
-            loss, variables, init, sess, grads, train, [x_data, y_data]
-        ]
+        self.values = [loss, variables, init, sess, grads, train, [x_data, y_data]]
         sess.run(init)
 
     def training_step(self, weights):
@@ -89,7 +88,8 @@ class TrainActor(object):
         variables.set_weights(weights)
         return sess.run(
             [grad[0] for grad in grads],
-            feed_dict=dict(zip(placeholders, [[1] * 100, [2] * 100])))
+            feed_dict=dict(zip(placeholders, [[1] * 100, [2] * 100])),
+        )
 
     def get_weights(self):
         return self.values[1].get_weights()
@@ -124,10 +124,8 @@ def test_tensorflow_variables(ray_start_2_cpus):
     variables2.set_flat(flat_weights)
     assert_almost_equal(flat_weights, variables2.get_flat())
 
-    variables3 = ray.experimental.tf_utils.TensorFlowVariables([loss2])
-    assert variables3.sess is None
     sess = tf.Session()
-    variables3.set_session(sess)
+    variables3 = ray.experimental.tf_utils.TensorFlowVariables([loss2], sess=sess)
     assert variables3.sess == sess
 
 
@@ -204,8 +202,7 @@ def test_network_driver_worker_independent(ray_start_2_cpus):
     net2 = ray.remote(NetActor).remote()
     weights2 = ray.get(net2.get_weights.remote())
 
-    new_weights2 = ray.get(
-        net2.set_and_get_weights.remote(net2.get_weights.remote()))
+    new_weights2 = ray.get(net2.set_and_get_weights.remote(net2.get_weights.remote()))
     assert weights2 == new_weights2
 
 
@@ -233,22 +230,31 @@ def test_remote_training_loss(ray_start_2_cpus):
     loss, variables, _, sess, grads, train, placeholders = net_values
 
     before_acc = sess.run(
-        loss, feed_dict=dict(zip(placeholders, [[2] * 100, [4] * 100])))
+        loss, feed_dict=dict(zip(placeholders, [[2] * 100, [4] * 100]))
+    )
 
     for _ in range(3):
-        gradients_list = ray.get([
-            net.training_step.remote(variables.get_weights()) for _ in range(2)
-        ])
+        gradients_list = ray.get(
+            [net.training_step.remote(variables.get_weights()) for _ in range(2)]
+        )
         mean_grads = [
-            sum(gradients[i]
-                for gradients in gradients_list) / len(gradients_list)
+            sum(gradients[i] for gradients in gradients_list) / len(gradients_list)
             for i in range(len(gradients_list[0]))
         ]
-        feed_dict = {
-            grad[0]: mean_grad
-            for (grad, mean_grad) in zip(grads, mean_grads)
-        }
+        feed_dict = {grad[0]: mean_grad for (grad, mean_grad) in zip(grads, mean_grads)}
         sess.run(train, feed_dict=feed_dict)
     after_acc = sess.run(
-        loss, feed_dict=dict(zip(placeholders, [[2] * 100, [4] * 100])))
+        loss, feed_dict=dict(zip(placeholders, [[2] * 100, [4] * 100]))
+    )
     assert before_acc < after_acc
+
+
+if __name__ == "__main__":
+    import pytest
+    import os
+    import sys
+
+    if os.environ.get("PARALLEL_CI"):
+        sys.exit(pytest.main(["-n", "auto", "--boxed", "-vs", __file__]))
+    else:
+        sys.exit(pytest.main(["-sv", __file__]))

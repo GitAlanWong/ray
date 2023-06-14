@@ -1,14 +1,31 @@
-#ifndef RAY_CONSTANTS_H_
-#define RAY_CONSTANTS_H_
+// Copyright 2017 The Ray Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#pragma once
 
 #include <limits.h>
 #include <stdint.h>
 
-/// Length of Ray full-length IDs in bytes.
-constexpr size_t kUniqueIDSize = 20;
+/// The precision of fractional resource quantity.
+constexpr int kResourceUnitScaling = 10000;
 
-/// Length of plasma ID in bytes.
-constexpr size_t kPlasmaIdSize = 20;
+constexpr char kWorkerSetupHookKeyName[] = "FunctionsToRun";
+
+constexpr int kStreamingGeneratorReturn = -2;
+
+/// Length of Ray full-length IDs in bytes.
+constexpr size_t kUniqueIDSize = 28;
 
 /// An ObjectID's bytes are split into the task ID itself and the index of the
 /// object's creation. This is the maximum width of the object index in bits.
@@ -16,11 +33,45 @@ constexpr int kObjectIdIndexSize = 32;
 static_assert(kObjectIdIndexSize % CHAR_BIT == 0,
               "ObjectID prefix not a multiple of bytes");
 
+/// Raylet exit code on plasma store socket error.
+constexpr int kRayletStoreErrorExitCode = 100;
+
 /// Prefix for the object table keys in redis.
 constexpr char kObjectTablePrefix[] = "ObjectTable";
-/// Prefix for the task table keys in redis.
-constexpr char kTaskTablePrefix[] = "TaskTable";
 
-constexpr char kWorkerDynamicOptionPlaceholderPrefix[] = "RAY_WORKER_OPTION_";
+constexpr char kWorkerDynamicOptionPlaceholder[] =
+    "RAY_WORKER_DYNAMIC_OPTION_PLACEHOLDER";
 
-#endif  // RAY_CONSTANTS_H_
+constexpr char kNodeManagerPortPlaceholder[] = "RAY_NODE_MANAGER_PORT_PLACEHOLDER";
+
+/// Public DNS address which is is used to connect and get local IP.
+constexpr char kPublicDNSServerIp[] = "8.8.8.8";
+constexpr int kPublicDNSServerPort = 53;
+
+constexpr char kEnvVarKeyJobId[] = "RAY_JOB_ID";
+constexpr char kEnvVarKeyRayletPid[] = "RAY_RAYLET_PID";
+
+/// for cross-langueage serialization
+constexpr int kMessagePackOffset = 9;
+
+/// Filename of "shim process" that sets up Python worker environment.
+/// Should be kept in sync with SETUP_WORKER_FILENAME in ray_constants.py
+constexpr char kSetupWorkerFilename[] = "setup_worker.py";
+
+/// The version of Ray
+constexpr char kRayVersion[] = "3.0.0.dev0";
+
+/// Name for cloud instance id env
+constexpr char kNodeCloudInstanceIdEnv[] = "RAY_CLOUD_INSTANCE_ID";
+
+/// Key for the placement group's bundle placement constraint.
+/// Used by FormatPlacementGroupLabelName()
+constexpr char kPlacementGroupConstraintKeyPrefix[] = "_PG_";
+
+#if defined(__APPLE__)
+constexpr char kLibraryPathEnvName[] = "DYLD_LIBRARY_PATH";
+#elif defined(_WIN32)
+constexpr char kLibraryPathEnvName[] = "PATH";
+#else
+constexpr char kLibraryPathEnvName[] = "LD_LIBRARY_PATH";
+#endif
